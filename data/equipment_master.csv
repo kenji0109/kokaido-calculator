@@ -1,4 +1,4 @@
-item_id,group_id,item_name,unit,price_yen,price_per_slot,requires_item_ids,notes,is_countable,is_power_item
+item_id,group_id,item_name,unit,price_once_yen,price_per_slot,requires_item_ids,notes,is_countable,is_power_item
 pa_c,conf_common,拡声装置C（マイク・スタンド各1本含）,式,0,5000,,（小会議室・大会議室）,1,0
 pa_d,conf_common,拡声装置D（マイク・スタンド各1本含）,式,0,3000,,（第6〜8会議室を全て利用した場合）,1,0
 mic_wired,common,有線マイク,台,0,1000,pa_c|pa_d|pa_a|pa_b,（拡声装置別途要）,1,0
