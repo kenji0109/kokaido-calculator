@@ -5,16 +5,14 @@ hall_mid,中集会室専用（基本セット）,中集会室,1,1
 hall_small,小集会室専用,小集会室,1,1
 hall_special,特別室専用,特別室,1,1
 conf_common,会議室共通（拡声C/TV等）,大会議室|第1会議室|第2会議室|第3会議室|第4会議室|第5会議室|第6会議室|第7会議室|第8会議室|第9会議室,1,1
-stage_props,大道具（中集会室）,中集会室,0,1
-setup_mid,設営（中集会室）,中集会室,0,1
+stage_props,大道具（中集会室）,中集会室,0,0
+setup_mid,設営（中集会室）,中集会室,0,0
 power,電源（持込）,*,1,1
-
 hall_big_light,大集会室 照明,大集会室,1,1
 hall_big_sound,大集会室 音響,大集会室,1,1
 hall_big_video,大集会室 映像,大集会室,1,1
 hall_big_stage,大集会室 舞台,大集会室,1,1
-stage_props_big,大道具（大集会室）,大集会室,1,1
-
+stage_props_big,大道具（大集会室）,大集会室,0,0
 piano_big,ピアノ（大集会室）,大集会室,1,1
 piano_mid,ピアノ（中集会室）,中集会室,1,1
 piano_small,ピアノ（小集会室）,小集会室,1,1
