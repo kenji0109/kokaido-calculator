@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -13,7 +13,7 @@ try:
 except Exception:
     jpholiday = None
 
-APP_TITLE = "公会堂料金電卓 MVP（部屋＋設備＋技術者＋インターネット）"
+APP_TITLE = "公会堂料金電卓 MVP（部屋×日編集＋設備＋技術者＋インターネット）"
 DATA_DIR = Path(__file__).parent / "data"
 
 PRICES_CSV = DATA_DIR / "prices.csv"
@@ -22,7 +22,8 @@ EQUIPMENT_GROUPS_CSV = DATA_DIR / "equipment_groups.csv"
 EQUIPMENT_MASTER_CSV = DATA_DIR / "equipment_master.csv"
 
 TIME_SLOTS = ["午前", "午後", "夜間", "午前-午後", "午後-夜間", "全日", "延長30分"]
-EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS  # ★設備だけ「利用なし」
+EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
+ROOM_SLOTS_WITH_NONE = ["利用なし"] + TIME_SLOTS
 
 
 # =========================
@@ -233,6 +234,15 @@ def collect_required_items(selected_item_ids: List[str], items: Dict[str, Equipm
     return list(selected_set)
 
 
+def _fix_equip_cell(v: object) -> str:
+    s = normalize_str(v)
+    if s == "" or s.lower() == "none":
+        return "利用なし"
+    if s not in EQUIPMENT_TIME_SLOTS:
+        return "利用なし"
+    return s
+
+
 def calc_equipment_total_for_day(
     day_slot_default: str,
     global_fallback_slot: str,
@@ -242,9 +252,9 @@ def calc_equipment_total_for_day(
     group_meta: Dict[str, GroupMeta],
 ) -> Tuple[int, pd.DataFrame]:
     """
-    事故防止の肝：
-    - price_per_slot > 0 のときだけ「区分課金」扱い
-    - price_per_slot == 0 かつ price_once_yen > 0 は「区分なし単価」扱い（倍率も区分も無視）
+    事故防止：
+    - price_per_slot > 0 のときだけ区分課金（倍率あり）
+    - price_per_slot == 0 かつ price_once_yen > 0 は区分なし単価（倍率なし）
     """
     if not selections:
         return 0, pd.DataFrame(
@@ -274,17 +284,14 @@ def calc_equipment_total_for_day(
         it = items[iid]
         meta = group_meta.get(it.group_id, GroupMeta(it.group_id, it.group_id, "*", 1, 1))
 
-        # --- 区分決定（区分課金アイテムのときのみ意味がある）---
         inherit = bool(meta.default_inherit_room_slot)
         base_slot = day_slot_default if inherit else global_fallback_slot
 
-        # グループoverrideは許可されている場合だけ
         if meta.allowed_slot_override and it.group_id in group_overrides:
             slot = group_overrides[it.group_id]
         else:
             slot = base_slot
 
-        # --- 課金分岐 ---
         is_slot_item = it.price_per_slot > 0
         is_once_item = (it.price_per_slot == 0) and (it.price_once_yen > 0)
 
@@ -295,7 +302,6 @@ def calc_equipment_total_for_day(
             subtotal = per_slot_sub + once_sub
             charge_type = "区分課金"
         elif is_once_item:
-            # 区分なし単価：区分・倍率は無視（事故防止）
             mult = 0
             per_slot_sub = 0
             once_sub = it.price_once_yen * qty
@@ -303,7 +309,6 @@ def calc_equipment_total_for_day(
             charge_type = "区分なし単価"
             slot = "（区分なし）"
         else:
-            # 価格が両方0：データ不備
             mult = 0
             per_slot_sub = 0
             once_sub = 0
@@ -379,59 +384,6 @@ def load_prices_df() -> pd.DataFrame:
     return df
 
 
-def calc_room_total_for_day(
-    prices_df: pd.DataFrame,
-    rooms: List[str],
-    day_type: str,
-    price_type: str,
-    slot: str,
-) -> Tuple[int, pd.DataFrame]:
-    if not rooms:
-        return 0, pd.DataFrame(columns=["種別", "部屋", "土日祝", "料金種別", "区分", "単価", "小計", "エラー"])
-
-    rows = []
-    total = 0
-    for room in rooms:
-        m = (
-            (prices_df["room"] == room)
-            & (prices_df["day_type"] == day_type)
-            & (prices_df["price_type"] == price_type)
-            & (prices_df["slot"] == slot)
-        )
-        hit = prices_df[m]
-        if hit.empty:
-            rows.append(
-                {
-                    "種別": "部屋",
-                    "部屋": room,
-                    "土日祝": day_type,
-                    "料金種別": price_type,
-                    "区分": slot,
-                    "単価": None,
-                    "小計": None,
-                    "エラー": "該当料金が prices.csv に見つかりません",
-                }
-            )
-            continue
-
-        amount = int(hit.iloc[0]["amount"])
-        total += amount
-        rows.append(
-            {
-                "種別": "部屋",
-                "部屋": room,
-                "土日祝": day_type,
-                "料金種別": price_type,
-                "区分": slot,
-                "単価": amount,
-                "小計": amount,
-                "エラー": "",
-            }
-        )
-
-    return total, pd.DataFrame(rows)
-
-
 # =========================
 # Internet (future-ready)
 # =========================
@@ -440,16 +392,13 @@ INTERNET_FIXED_FIRST_DAY = 18000
 INTERNET_FIXED_AFTER_DAY = 2000
 INTERNET_TEMP_LINE_BASE = 5000  # + 別途見積
 
-FLOOR_1_ROOMS = {"大集会室"}          # 1F扱い（あなたの運用に合わせて増やしてOK）
-FLOOR_3_ROOMS = {"中集会室", "小集会室"}  # 3F扱い（中・小は同フロア課金）
+FLOOR_1_ROOMS = {"大集会室"}               # 1F扱い
+FLOOR_3_ROOMS = {"中集会室", "小集会室"}   # 3F扱い（同フロア課金）
 
 
 def infer_internet_floors(selected_rooms: List[str]) -> Dict[str, bool]:
     s = set(selected_rooms)
-    return {
-        "1F": bool(s & FLOOR_1_ROOMS),
-        "3F": bool(s & FLOOR_3_ROOMS),
-    }
+    return {"1F": bool(s & FLOOR_1_ROOMS), "3F": bool(s & FLOOR_3_ROOMS)}
 
 
 def calc_internet_total(
@@ -466,22 +415,31 @@ def calc_internet_total(
     active_days = [pd.Timestamp(x).date() for x in df_days_calc["日付"].tolist()]
     active_days_sorted = sorted(active_days)
 
-    # ① ポケットWi-Fi（利用日は「部屋を使う日」に限る＝計算対象日）
+    if not active_days_sorted:
+        return 0, pd.DataFrame(columns=["日付", "種別", "品目", "フロア", "小計", "備考"])
+
+    # ① ポケットWi-Fi
     if use_pocket_wifi:
         for d in active_days_sorted:
             rows.append(
-                {"日付": d, "種別": "インターネット", "品目": "ポケットWi-Fi貸出", "フロア": "全部屋", "小計": INTERNET_POCKET_WIFI_PER_DAY, "備考": "先着順/同時接続目安5台/電波不安定の可能性"}
+                {
+                    "日付": d,
+                    "種別": "インターネット",
+                    "品目": "ポケットWi-Fi貸出",
+                    "フロア": "全部屋",
+                    "小計": INTERNET_POCKET_WIFI_PER_DAY,
+                    "備考": "先着順/同時接続目安5台/電波不安定の可能性",
+                }
             )
             total += INTERNET_POCKET_WIFI_PER_DAY
 
     # ② 常設回線（フロア毎／連続利用で段階料金）
-    # 連続判定は「計算対象日」を基準にする（休館日で途切れる）
     if use_fixed_line:
         for floor_label, enabled in floors.items():
             if not enabled:
                 continue
 
-            # 連続ブロックに分割
+            # 連続ブロックに分割（休館日で途切れる）
             blocks = []
             block = []
             for d in active_days_sorted:
@@ -500,15 +458,29 @@ def calc_internet_total(
             for b in blocks:
                 if not b:
                     continue
-                # 初日
+
                 rows.append(
-                    {"日付": b[0], "種別": "インターネット", "品目": "常設回線（初日）", "フロア": floor_label, "小計": INTERNET_FIXED_FIRST_DAY, "備考": "連続利用の段階料金"}
+                    {
+                        "日付": b[0],
+                        "種別": "インターネット",
+                        "品目": "常設回線（初日）",
+                        "フロア": floor_label,
+                        "小計": INTERNET_FIXED_FIRST_DAY,
+                        "備考": "連続利用の段階料金",
+                    }
                 )
                 total += INTERNET_FIXED_FIRST_DAY
-                # 2日目以降
+
                 for d in b[1:]:
                     rows.append(
-                        {"日付": d, "種別": "インターネット", "品目": "常設回線（2日目以降）", "フロア": floor_label, "小計": INTERNET_FIXED_AFTER_DAY, "備考": "連続利用の段階料金"}
+                        {
+                            "日付": d,
+                            "種別": "インターネット",
+                            "品目": "常設回線（2日目以降）",
+                            "フロア": floor_label,
+                            "小計": INTERNET_FIXED_AFTER_DAY,
+                            "備考": "連続利用の段階料金",
+                        }
                     )
                     total += INTERNET_FIXED_AFTER_DAY
 
@@ -518,7 +490,14 @@ def calc_internet_total(
             if not enabled:
                 continue
             rows.append(
-                {"日付": active_days_sorted[0] if active_days_sorted else None, "種別": "インターネット", "品目": "仮設回線（開通工事）", "フロア": floor_label, "小計": INTERNET_TEMP_LINE_BASE, "備考": "＋別途お見積り（NTT回線開通工事）"}
+                {
+                    "日付": active_days_sorted[0],
+                    "種別": "インターネット",
+                    "品目": "仮設回線（開通工事）",
+                    "フロア": floor_label,
+                    "小計": INTERNET_TEMP_LINE_BASE,
+                    "備考": "＋別途お見積り（NTT回線開通工事）",
+                }
             )
             total += INTERNET_TEMP_LINE_BASE
 
@@ -527,25 +506,17 @@ def calc_internet_total(
 
 
 # =========================
-# Day settings state sync
+# Day settings (for equipment/tech)
 # =========================
-def make_days_base(
-    days: List[pd.Timestamp],
-    closed_days: set,
-    default_room_slot: str,
-    is_business_default: bool,
-) -> pd.DataFrame:
+def make_days_base(days: List[pd.Timestamp], closed_days: set, default_room_slot: str, is_business_default: bool) -> pd.DataFrame:
     rows = []
     for d in days:
-        w = "土日祝" if is_weekend_or_holiday(d) else "平日"
-        hn = holiday_name(d)
         rows.append(
             {
                 "日付": d.date().isoformat(),
-                "土日祝": w,
-                "祝日名": hn,
+                "土日祝": "土日祝" if is_weekend_or_holiday(d) else "平日",
+                "祝日名": holiday_name(d),
                 "休館日": bool(d.date() in closed_days),
-                "部屋区分": default_room_slot,
                 "割増利用": bool(is_business_default),
                 "設備デフォ区分": default_room_slot,
                 "技術者区分": default_room_slot,
@@ -554,35 +525,20 @@ def make_days_base(
     return pd.DataFrame(rows)
 
 
-def _fix_equip_cell(v: object) -> str:
-    s = normalize_str(v)
-    if s == "" or s.lower() == "none":
-        return "利用なし"
-    if s not in EQUIPMENT_TIME_SLOTS:
-        return "利用なし"
-    return s
-
-
-def sync_defaults_into_day_df(
-    df: pd.DataFrame,
-    old_defaults: Dict[str, object],
-    new_defaults: Dict[str, object],
-) -> pd.DataFrame:
+def sync_days_df_defaults(df: pd.DataFrame, old_defaults: Dict[str, object], new_defaults: Dict[str, object]) -> pd.DataFrame:
     """
-    デフォルト変更を日別へ自動反映。
-    ただし「手で変えたセル」を潰しにくくするため、
-    「旧デフォルトと同じ値のセルだけ」を新デフォルトへ置換する。
+    デフォルト変更を日別へ反映：
+    旧デフォルトと同じ値のセルだけを新デフォルトへ置換（手編集を潰しにくい）
     """
     df = df.copy()
 
-    # 休館日・土日祝・祝日名は毎回再計算（表示ズレ防止）
+    # 表示系は再計算
     for i in range(len(df)):
         d = pd.Timestamp(df.loc[i, "日付"])
         df.loc[i, "土日祝"] = "土日祝" if is_weekend_or_holiday(d) else "平日"
         df.loc[i, "祝日名"] = holiday_name(d)
 
-    # 主要列の差し替え
-    cols = ["部屋区分", "割増利用", "設備デフォ区分", "技術者区分"]
+    cols = ["割増利用", "設備デフォ区分", "技術者区分"]
     for c in cols:
         if c not in df.columns:
             continue
@@ -590,31 +546,263 @@ def sync_defaults_into_day_df(
         newv = new_defaults.get(c, None)
         if oldv == newv:
             continue
-
-        # "旧デフォルトと一致しているセルだけ" 新デフォルトに置換
         mask = df[c].astype(str) == str(oldv)
         df.loc[mask, c] = newv
 
-    # 設備デフォ区分の正規化（None/空白対策）
     if "設備デフォ区分" in df.columns:
         df["設備デフォ区分"] = df["設備デフォ区分"].apply(_fix_equip_cell)
 
-    # 技術者区分が空なら部屋区分へ（事故防止）
-    if "技術者区分" in df.columns and "部屋区分" in df.columns:
-        def _fix_tech(v, roomv):
+    if "技術者区分" in df.columns:
+        def _fix_tech(v):
             sv = normalize_str(v)
             if sv == "" or sv.lower() == "none":
-                return normalize_str(roomv) or "全日"
+                return new_defaults.get("技術者区分", "全日")
             return sv
-        df["技術者区分"] = [
-            _fix_tech(df.loc[i, "技術者区分"], df.loc[i, "部屋区分"]) for i in range(len(df))
-        ]
+        df["技術者区分"] = df["技術者区分"].apply(_fix_tech)
 
     return df
 
 
 # =========================
-# App
+# Room-Day Table (Main Input for rooms)
+# =========================
+def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
+    m = {}
+    for _, r in days_df.iterrows():
+        m[normalize_str(r["日付"])] = bool(r.get("割増利用", False))
+    return m
+
+
+def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], default_room_slot: str) -> pd.DataFrame:
+    """
+    重要：部屋×日テーブルは「計算の唯一入力」。
+    ただし、日別の割増を“同期”するために、手動フラグを持たせる。
+    """
+    rows = []
+    day_business = _day_business_map(days_df)
+
+    for _, drow in days_df.iterrows():
+        date_str = normalize_str(drow["日付"])
+        ts = pd.Timestamp(date_str)
+        for room in selected_rooms:
+            rows.append(
+                {
+                    "日付": date_str,
+                    "土日祝": "土日祝" if is_weekend_or_holiday(ts) else "平日",
+                    "祝日名": holiday_name(ts),
+                    "休館日": bool(drow.get("休館日", False)),
+                    "部屋": room,
+                    "区分": default_room_slot,
+                    "割増利用": bool(day_business.get(date_str, False)),
+                    # 追加：手動フラグ（ここが今回の肝）
+                    "手動区分": False,
+                    "手動割増": False,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def merge_room_day(
+    current: pd.DataFrame,
+    days_df: pd.DataFrame,
+    selected_rooms: List[str],
+    default_room_slot: str,
+) -> pd.DataFrame:
+    """
+    同期ルール：
+    - 手動フラグFalseのセルは、日別デフォルトで上書き（=一括割増が効く）
+    - 手動フラグTrueのセルは、ユーザー指定を保持（=個別に利用なし/割増OFFが効く）
+    """
+    base = build_room_day_base(days_df, selected_rooms, default_room_slot)
+    if current is None or current.empty:
+        return base
+
+    cur = current.copy()
+    for c in ["日付", "部屋"]:
+        if c in cur.columns:
+            cur[c] = cur[c].map(normalize_str)
+
+    # 旧バージョン互換：手動列がない場合は追加
+    if "手動区分" not in cur.columns:
+        cur["手動区分"] = True  # 既存は「ユーザーが触った扱い」にして事故を防ぐ
+    if "手動割増" not in cur.columns:
+        cur["手動割増"] = True
+
+    key_cols = ["日付", "部屋"]
+    keep_cols = key_cols + ["区分", "割増利用", "手動区分", "手動割増"]
+    cur_small = cur[keep_cols].copy()
+
+    merged = base.merge(cur_small, on=key_cols, how="left", suffixes=("", "_old"))
+
+    # 手動フラグ：旧を引き継ぐ（なければFalse）
+    merged["手動区分"] = merged["手動区分_old"].fillna(merged["手動区分"]).astype(bool)
+    merged["手動割増"] = merged["手動割増_old"].fillna(merged["手動割増"]).astype(bool)
+
+    # 区分：手動なら旧を採用、それ以外はbase（=デフォルト）
+    merged.loc[merged["手動区分"], "区分"] = merged.loc[merged["手動区分"], "区分_old"].fillna(
+        merged.loc[merged["手動区分"], "区分"]
+    )
+
+    # 割増：手動なら旧を採用、それ以外はbase（=日別同期）
+    merged.loc[merged["手動割増"], "割増利用"] = merged.loc[merged["手動割増"], "割増利用_old"].fillna(
+        merged.loc[merged["手動割増"], "割増利用"]
+    )
+
+    # cleanup
+    drop_cols = [c for c in merged.columns if c.endswith("_old")]
+    if drop_cols:
+        merged.drop(columns=drop_cols, inplace=True)
+
+    def _fix_room_slot(v):
+        s = normalize_str(v)
+        if s == "" or s.lower() == "none":
+            return default_room_slot
+        if s not in ROOM_SLOTS_WITH_NONE:
+            return default_room_slot
+        return s
+
+    merged["区分"] = merged["区分"].apply(_fix_room_slot)
+    merged["割増利用"] = merged["割増利用"].astype(bool)
+
+    return merged
+
+
+# =========================
+# Room calculation from Room-Day table
+# =========================
+def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame) -> Tuple[int, pd.DataFrame]:
+    if room_day_df is None or room_day_df.empty:
+        return 0, pd.DataFrame(columns=["日付", "種別", "グループ", "品目", "区分", "数量/人数", "単価", "倍率", "小計", "自動追加", "備考"])
+
+    rows = []
+    total = 0
+
+    for _, r in room_day_df.iterrows():
+        if bool(r.get("休館日", False)):
+            continue
+
+        date_str = normalize_str(r.get("日付", ""))
+        room = normalize_str(r.get("部屋", ""))
+        slot = normalize_str(r.get("区分", ""))
+        is_business = bool(r.get("割増利用", False))
+
+        dts = pd.Timestamp(date_str)
+
+        if slot == "利用なし":
+            rows.append(
+                {
+                    "日付": dts.date(),
+                    "種別": "部屋",
+                    "グループ": "",
+                    "品目": room,
+                    "区分": "利用なし",
+                    "数量/人数": 1,
+                    "単価": 0,
+                    "倍率": 0,
+                    "小計": 0,
+                    "自動追加": False,
+                    "備考": "",
+                }
+            )
+            continue
+
+        day_type = "土日祝" if is_weekend_or_holiday(dts) else "平日"
+        price_type = "割増" if is_business else "通常"
+
+        m = (
+            (prices_df["room"] == room)
+            & (prices_df["day_type"] == day_type)
+            & (prices_df["price_type"] == price_type)
+            & (prices_df["slot"] == slot)
+        )
+        hit = prices_df[m]
+        if hit.empty:
+            rows.append(
+                {
+                    "日付": dts.date(),
+                    "種別": "部屋",
+                    "グループ": "",
+                    "品目": room,
+                    "区分": slot,
+                    "数量/人数": 1,
+                    "単価": None,
+                    "倍率": 1,
+                    "小計": None,
+                    "自動追加": False,
+                    "備考": "該当料金が prices.csv に見つかりません",
+                }
+            )
+            continue
+
+        amount = int(hit.iloc[0]["amount"])
+        total += amount
+        rows.append(
+            {
+                "日付": dts.date(),
+                "種別": "部屋",
+                "グループ": "",
+                "品目": room,
+                "区分": slot,
+                "数量/人数": 1,
+                "単価": amount,
+                "倍率": 1,
+                "小計": amount,
+                "自動追加": False,
+                "備考": "",
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    return total, df
+
+
+# =========================
+# KPI Display (no ellipsis)
+# =========================
+def yen(x: int) -> str:
+    try:
+        return f"{int(x):,} 円"
+    except Exception:
+        return f"{x} 円"
+
+
+def render_kpis(room_total: int, equipment_total: int, tech_total: int, internet_total: int):
+    st.markdown(
+        """
+<style>
+.kpi-wrap {display:flex; gap:14px; flex-wrap:wrap;}
+.kpi {
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 12px;
+  padding: 12px 14px;
+  min-width: 220px;
+  flex: 1;
+}
+.kpi .label {font-size: 14px; opacity: 0.75; margin-bottom: 6px;}
+.kpi .value {font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: clip;}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+    grand_total = room_total + equipment_total + tech_total + internet_total
+
+    st.markdown(
+        f"""
+<div class="kpi-wrap">
+  <div class="kpi"><div class="label">部屋代 合計</div><div class="value">{yen(room_total)}</div></div>
+  <div class="kpi"><div class="label">設備 合計</div><div class="value">{yen(equipment_total)}</div></div>
+  <div class="kpi"><div class="label">技術者 合計</div><div class="value">{yen(tech_total)}</div></div>
+  <div class="kpi"><div class="label">インターネット 合計</div><div class="value">{yen(internet_total)}</div></div>
+  <div class="kpi"><div class="label">総額（全部）</div><div class="value">{yen(grand_total)}</div></div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# =========================
+# Main App
 # =========================
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -641,11 +829,8 @@ def main():
 
     left, right = st.columns([1, 1.35], gap="large")
 
-    # ここで宣言（UIの後半で参照するため）
-    equipment_any_day = True
-
     with left:
-        st.subheader("1) 期間・部屋・区分（部屋料金）")
+        st.subheader("1) 期間・部屋（部屋×日テーブル編集）")
 
         col_a, col_b = st.columns(2)
         start_date = col_a.date_input("開始日", value=pd.Timestamp.today().date())
@@ -661,43 +846,39 @@ def main():
         room_candidates = sorted(prices_df["room"].unique().tolist())
         rooms = st.multiselect("部屋（複数OK）", room_candidates, default=[])
 
-        default_room_slot = st.selectbox("部屋の利用区分（デフォルト）", TIME_SLOTS, index=TIME_SLOTS.index("全日"))
-        is_business_default = st.checkbox("割増利用（物販/入場料徴収など）※デフォルト", value=False)
+        default_room_slot = st.selectbox("部屋の区分（新規追加の初期値）", TIME_SLOTS, index=TIME_SLOTS.index("全日"))
+        is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
 
+        # 日別（設備・技術者用）
         st.divider()
-        st.subheader("日別の区分設定（パターンA）")
-        st.caption("デフォルト変更は日別にも自動反映（ただし手で変えた行はなるべく保持します）。")
+        st.subheader("日別設定（設備・技術者・インターネットに使用）")
+        st.caption("※部屋は『部屋×日テーブル』が計算の唯一入力（見た目＝計算）になります。")
 
-        # --- 日別設定をsession_stateに保存（デフォルト変更時に自動同期）---
-        key_days = f"day_settings_{start_date}_{end_date}"
-
+        days_key = f"days_{start_date}_{end_date}"
         new_defaults = {
-            "部屋区分": default_room_slot,
             "割増利用": bool(is_business_default),
             "設備デフォ区分": default_room_slot,
             "技術者区分": default_room_slot,
         }
 
-        if key_days not in st.session_state:
-            df_base = make_days_base(days, closed_days, default_room_slot, is_business_default)
-            st.session_state[key_days] = df_base
-            st.session_state[key_days + "_defaults"] = dict(new_defaults)
+        if days_key not in st.session_state:
+            df_days = make_days_base(days, closed_days, default_room_slot, is_business_default)
+            st.session_state[days_key] = df_days
+            st.session_state[days_key + "_defaults"] = dict(new_defaults)
         else:
-            df_existing: pd.DataFrame = st.session_state[key_days]
-            # 期間が変わって行数/日付がズレたら作り直し
+            df_existing = st.session_state[days_key]
             if len(df_existing) != len(days) or df_existing.iloc[0]["日付"] != days[0].date().isoformat() or df_existing.iloc[-1]["日付"] != days[-1].date().isoformat():
-                df_base = make_days_base(days, closed_days, default_room_slot, is_business_default)
-                st.session_state[key_days] = df_base
-                st.session_state[key_days + "_defaults"] = dict(new_defaults)
+                df_days = make_days_base(days, closed_days, default_room_slot, is_business_default)
+                st.session_state[days_key] = df_days
+                st.session_state[days_key + "_defaults"] = dict(new_defaults)
             else:
-                old_defaults = st.session_state.get(key_days + "_defaults", dict(new_defaults))
-                st.session_state[key_days] = sync_defaults_into_day_df(df_existing, old_defaults, new_defaults)
-                st.session_state[key_days + "_defaults"] = dict(new_defaults)
+                old_defaults = st.session_state.get(days_key + "_defaults", dict(new_defaults))
+                st.session_state[days_key] = sync_days_df_defaults(df_existing, old_defaults, new_defaults)
+                st.session_state[days_key + "_defaults"] = dict(new_defaults)
 
-        # 編集
         try:
             edited_days = st.data_editor(
-                st.session_state[key_days],
+                st.session_state[days_key],
                 use_container_width=True,
                 num_rows="fixed",
                 column_config={
@@ -705,7 +886,6 @@ def main():
                     "土日祝": st.column_config.TextColumn(disabled=True),
                     "祝日名": st.column_config.TextColumn(disabled=True),
                     "休館日": st.column_config.CheckboxColumn(disabled=True),
-                    "部屋区分": st.column_config.SelectboxColumn(options=TIME_SLOTS),
                     "割増利用": st.column_config.CheckboxColumn(),
                     "設備デフォ区分": st.column_config.SelectboxColumn(options=EQUIPMENT_TIME_SLOTS),
                     "技術者区分": st.column_config.SelectboxColumn(options=TIME_SLOTS),
@@ -713,13 +893,131 @@ def main():
             )
             edited_days = edited_days.copy()
             edited_days["設備デフォ区分"] = edited_days["設備デフォ区分"].apply(_fix_equip_cell)
-            st.session_state[key_days] = edited_days
+            st.session_state[days_key] = edited_days
         except Exception:
             st.warning("この環境では日別編集UIが使えないため、日別設定は表示のみになります。")
-            edited_days = st.session_state[key_days]
+            edited_days = st.session_state[days_key]
             st.dataframe(edited_days, use_container_width=True)
 
-        # 設備入力の有効/無効（誤入力防止）
+        # ========= 部屋×日テーブル =========
+        st.divider()
+        st.subheader("部屋×日 テーブル（ここで区分/割増を個別に調整できます）")
+        st.caption("ラグ事故防止のため、編集後は『変更を反映（確定）』を押してから計算してください。")
+
+        room_day_key = f"room_day_{start_date}_{end_date}"
+
+        if room_day_key not in st.session_state:
+            st.session_state[room_day_key] = build_room_day_base(edited_days, list(rooms), default_room_slot)
+        else:
+            st.session_state[room_day_key] = merge_room_day(st.session_state[room_day_key], edited_days, list(rooms), default_room_slot)
+
+        # ------- フィルター（表示だけ） -------
+        st.markdown("### フィルター（編集しやすくする）")
+        f1, f2 = st.columns([1, 1])
+
+        all_dates = sorted(st.session_state[room_day_key]["日付"].unique().tolist())
+        date_filter = f1.multiselect(
+            "日付で絞り込み（未選択＝全日）",
+            options=all_dates,
+            default=[],
+            key=f"filter_dates_{room_day_key}",
+        )
+
+        all_rooms_in_table = sorted(st.session_state[room_day_key]["部屋"].unique().tolist())
+        room_filter = f2.multiselect(
+            "部屋で絞り込み（未選択＝全部屋）",
+            options=all_rooms_in_table,
+            default=[],
+            key=f"filter_rooms_{room_day_key}",
+        )
+
+        view_df = st.session_state[room_day_key].copy()
+        if date_filter:
+            view_df = view_df[view_df["日付"].isin(date_filter)]
+        if room_filter:
+            view_df = view_df[view_df["部屋"].isin(room_filter)]
+        view_df = view_df.reset_index(drop=True)
+
+        # ------- フォーム（確定ボタン方式） -------
+        st.info("✅ 表を編集したら、下の『この表の変更を反映（確定）』を押してね（ラグ事故防止）")
+
+        with st.form("room_day_form", clear_on_submit=False):
+            edited_room_day_tmp = st.data_editor(
+                view_df,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "日付": st.column_config.TextColumn(disabled=True),
+                    "土日祝": st.column_config.TextColumn(disabled=True),
+                    "祝日名": st.column_config.TextColumn(disabled=True),
+                    "休館日": st.column_config.CheckboxColumn(disabled=True),
+                    "部屋": st.column_config.TextColumn(disabled=True),
+                    "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
+                    "割増利用": st.column_config.CheckboxColumn(),
+                    # 手動フラグはユーザーには見せない（内部用）
+                    "手動区分": st.column_config.CheckboxColumn(disabled=True),
+                    "手動割増": st.column_config.CheckboxColumn(disabled=True),
+                },
+            )
+            apply_room_day = st.form_submit_button("この表の変更を反映（確定）")
+
+        if apply_room_day:
+            day_business = _day_business_map(edited_days)
+
+            edited_part = edited_room_day_tmp.copy()
+            edited_part["日付"] = edited_part["日付"].map(normalize_str)
+            edited_part["部屋"] = edited_part["部屋"].map(normalize_str)
+
+            def _fix_room_slot(v):
+                s = normalize_str(v)
+                if s == "" or s.lower() == "none":
+                    return default_room_slot
+                if s not in ROOM_SLOTS_WITH_NONE:
+                    return default_room_slot
+                return s
+
+            edited_part["区分"] = edited_part["区分"].apply(_fix_room_slot)
+            edited_part["割増利用"] = edited_part["割増利用"].astype(bool)
+
+            # 手動フラグをここで決定：
+            # - 区分：デフォルトと違えば「手動」
+            edited_part["手動区分"] = edited_part["区分"].map(normalize_str) != normalize_str(default_room_slot)
+
+            # - 割増：その日の「日別割増」と違えば「手動」
+            def _manual_business(row) -> bool:
+                d = normalize_str(row["日付"])
+                day_def = bool(day_business.get(d, False))
+                return bool(row["割増利用"]) != day_def
+
+            edited_part["手動割増"] = edited_part.apply(_manual_business, axis=1)
+
+            full = st.session_state[room_day_key].copy()
+            full["日付"] = full["日付"].map(normalize_str)
+            full["部屋"] = full["部屋"].map(normalize_str)
+
+            # 旧互換：手動列がなければ追加
+            if "手動区分" not in full.columns:
+                full["手動区分"] = True
+            if "手動割増" not in full.columns:
+                full["手動割増"] = True
+
+            key_cols = ["日付", "部屋"]
+            merged = full.merge(
+                edited_part[key_cols + ["区分", "割増利用", "手動区分", "手動割増"]],
+                on=key_cols,
+                how="left",
+                suffixes=("", "_new"),
+            )
+
+            for c in ["区分", "割増利用", "手動区分", "手動割増"]:
+                merged[c] = merged[f"{c}_new"].fillna(merged[c])
+            merged.drop(columns=[c for c in merged.columns if c.endswith("_new")], inplace=True)
+
+            st.session_state[room_day_key] = merged
+            st.success("✅ 反映しました！この状態で『計算する』を押してOKです")
+            st.rerun()
+
+        # 設備入力が必要か判定（休館日除外の上で）
         try:
             _df_chk = edited_days.copy()
             _df_chk = _df_chk[_df_chk["休館日"] == False]
@@ -736,24 +1034,24 @@ def main():
             equipment_any_day = True
 
         if not equipment_any_day:
-            st.info("✅ 日別設定がすべて「設備デフォ区分：利用なし」なので、設備入力はロックします（誤入力防止）")
+            st.info("✅ 日別設定がすべて『設備デフォ区分：利用なし』なので、設備入力はロックします（誤入力防止）")
             for k in list(st.session_state.keys()):
                 if str(k).startswith("qty_"):
                     st.session_state[k] = 0
 
+        # ========= 設備 =========
         st.divider()
         st.subheader("2) 設備（追加）")
         if not equipment_any_day:
             st.caption("※この期間は設備計算を行いません（全日：利用なし）")
 
-        # グローバルフォールバック（継承しないグループ用）
         global_fallback_slot = st.selectbox(
             "設備区分のフォールバック（※日別の設備デフォ区分を継承しないグループ用）",
             TIME_SLOTS,
             index=TIME_SLOTS.index(default_room_slot),
             disabled=(not equipment_any_day),
         )
-        st.caption("※大道具/設営など（groupで継承しない指定）はこのフォールバックが基準になります")
+        st.caption("※グループoverride不可のグループはロックされます（事故防止）")
 
         def group_visible(row) -> bool:
             applicable = parse_list_cell(row["applies_to_rooms"])
@@ -776,7 +1074,6 @@ def main():
             with st.expander(f"設備グループ：{gname}", expanded=False):
                 col1, col2 = st.columns([1, 1])
 
-                # allowed_slot_override=0 なら UI を出さない（事故防止）
                 if meta.allowed_slot_override and equipment_any_day:
                     override = col1.selectbox(
                         f"{gname} の区分（変更する場合だけ）",
@@ -790,17 +1087,17 @@ def main():
                 else:
                     col1.caption("🔒 このグループは区分override不可（事故防止）")
 
-                inherit_text = "日別の設備デフォ区分を継承" if meta.default_inherit_room_slot else "継承しない（フォールバック基準）"
+                inherit_text = "日別設備デフォ区分を継承" if meta.default_inherit_room_slot else "継承しない（フォールバック）"
                 col2.caption(f"設定: {inherit_text}")
 
                 group_items = sorted([it for it in items.values() if it.group_id == gid], key=lambda x: x.item_name)
+
                 if not group_items:
                     st.info("このグループには品目がありません（equipment_master.csvを確認）")
                 else:
                     for it in group_items:
                         cA, cB, cC = st.columns([3, 1, 1])
 
-                        # 表示：区分課金 or 区分なし単価
                         if it.price_per_slot > 0:
                             line = f"**{it.item_name}**（単位:{it.unit} / 1区分:{it.price_per_slot:,}円"
                             if it.price_once_yen:
@@ -827,16 +1124,17 @@ def main():
                         if it.notes:
                             cC.caption(it.notes)
 
+        # ========= 技術者 =========
         st.divider()
         st.subheader("3) 舞台設備技術者")
         tech_people = st.number_input("技術者人数（1名あたり課金）", min_value=0, value=0, step=1)
         tech_slot_fallback = st.selectbox(
-            "技術者区分のフォールバック（※日別設定が空のときだけ使用）",
+            "技術者区分のフォールバック（※日別設定が空のときだけ）",
             TIME_SLOTS,
             index=TIME_SLOTS.index(default_room_slot),
         )
-        st.caption("※日別の「技術者区分」が入っていれば、それを最優先します（ズレ防止）")
 
+        # ========= インターネット =========
         st.divider()
         st.subheader("4) インターネット（将来込みを想定・暫定実装）")
         use_pocket_wifi = st.checkbox("① ポケットWi-Fi貸出（2,800円/日）", value=False)
@@ -852,7 +1150,8 @@ def main():
             st.info("左で条件を入れて「計算する」を押してね 😎")
             st.stop()
 
-        df_days = st.session_state[key_days].copy()
+        df_days = st.session_state[days_key].copy()
+        room_day_df = st.session_state.get(room_day_key, pd.DataFrame()).copy()
 
         excluded = df_days[df_days["休館日"] == True].copy()
         df_days_calc = df_days[df_days["休館日"] == False].copy()
@@ -864,61 +1163,26 @@ def main():
         if not excluded.empty:
             st.warning(f"休館日として除外した日数: {len(excluded)}（例: {excluded.iloc[0]['日付']} …）")
 
-        st.dataframe(df_days, use_container_width=True)
-
-        room_grand = 0
-        equipment_grand = 0
-        tech_grand = 0
-        internet_grand = 0
+        # 部屋（テーブルをそのまま計算）
+        room_total, room_break = calc_rooms_from_room_day(prices_df, room_day_df)
 
         breakdown_rows = []
+        if not room_break.empty:
+            breakdown_rows.extend(room_break.to_dict("records"))
+
+        # 設備・技術者は日別設定ベースで日ごとに計算
+        equipment_grand = 0
+        tech_grand = 0
 
         for _, day in df_days_calc.iterrows():
             d = pd.Timestamp(day["日付"])
 
-            # ★祝日も含めて day_type を決める（課題2の解消）
-            day_type = "土日祝" if is_weekend_or_holiday(d) else "平日"
-
-            room_slot = normalize_str(day["部屋区分"]) or default_room_slot
-            is_business_day = bool(day.get("割増利用", False))
-            price_type = "割増" if is_business_day else "通常"
-
-            # 設備：日別の設備デフォ区分
             raw_equip = normalize_str(day.get("設備デフォ区分", ""))
             equipment_default_slot_day = _fix_equip_cell(raw_equip)
 
-            # 技術者：日別優先 → 空ならフォールバック → それでも空なら部屋区分
-            tech_slot_day = normalize_str(day.get("技術者区分", "")) or tech_slot_fallback or room_slot
+            tech_slot_day = normalize_str(day.get("技術者区分", "")) or tech_slot_fallback or "全日"
 
-            # 部屋
-            room_total, room_df = calc_room_total_for_day(
-                prices_df=prices_df,
-                rooms=rooms,
-                day_type=day_type,
-                price_type=price_type,
-                slot=room_slot,
-            )
-            room_grand += room_total
-
-            if not room_df.empty:
-                for _, r in room_df.iterrows():
-                    breakdown_rows.append(
-                        {
-                            "日付": d.date(),
-                            "種別": "部屋",
-                            "グループ": "",
-                            "品目": r["部屋"],
-                            "区分": r["区分"],
-                            "数量/人数": 1,
-                            "単価": r["単価"],
-                            "倍率": 1,
-                            "小計": r["小計"],
-                            "自動追加": False,
-                            "備考": r.get("エラー", ""),
-                        }
-                    )
-
-            # 設備（利用なしならスキップ）
+            # 設備
             if equipment_default_slot_day == "利用なし":
                 eq_total, eq_df = 0, pd.DataFrame()
             else:
@@ -932,7 +1196,6 @@ def main():
                 )
 
             equipment_grand += eq_total
-
             if not eq_df.empty:
                 for _, r in eq_df.iterrows():
                     breakdown_rows.append(
@@ -943,7 +1206,7 @@ def main():
                             "品目": r["品目"],
                             "区分": r["区分"],
                             "数量/人数": r["数量"],
-                            "単価": (r["単価(1区分)"] if pd.notna(r["単価(1区分)"]) else 0),
+                            "単価": int(r["単価(1区分)"]) if pd.notna(r["単価(1区分)"]) else 0,
                             "倍率": r["倍率"],
                             "小計": r["小計"],
                             "自動追加": r["自動追加"],
@@ -954,65 +1217,48 @@ def main():
             # 技術者
             tech_total, tech_df = calc_stage_tech_total_for_day(tech_slot_day, int(tech_people))
             tech_grand += tech_total
-
             if not tech_df.empty:
-                r = tech_df.iloc[0].to_dict()
+                tr = tech_df.iloc[0].to_dict()
                 breakdown_rows.append(
                     {
                         "日付": d.date(),
                         "種別": "技術者",
                         "グループ": "",
                         "品目": "舞台設備技術者",
-                        "区分": r["区分"],
-                        "数量/人数": r["人数"],
-                        "単価": r["単価(1名)"],
+                        "区分": tr["区分"],
+                        "数量/人数": tr["人数"],
+                        "単価": tr["単価(1名)"],
                         "倍率": 1,
-                        "小計": r["小計"],
+                        "小計": tr["小計"],
                         "自動追加": False,
                         "備考": "",
                     }
                 )
 
-        # インターネット（期間合算。内訳は別表に出す）
+        # インターネット（期間合算）
         internet_total, internet_df = calc_internet_total(
             df_days_calc=df_days_calc,
-            selected_rooms=rooms,
+            selected_rooms=list(rooms),
             use_pocket_wifi=use_pocket_wifi,
             use_fixed_line=use_fixed_line,
             use_temp_line=use_temp_line,
         )
-        internet_grand += internet_total
-
-        if not internet_df.empty:
-            for _, r in internet_df.iterrows():
-                breakdown_rows.append(
-                    {
-                        "日付": r["日付"],
-                        "種別": "インターネット",
-                        "グループ": r.get("フロア", ""),
-                        "品目": r.get("品目", ""),
-                        "区分": "日",
-                        "数量/人数": 1,
-                        "単価": r.get("小計", 0),
-                        "倍率": 1,
-                        "小計": r.get("小計", 0),
-                        "自動追加": False,
-                        "備考": r.get("備考", ""),
-                    }
-                )
 
         st.divider()
-        st.subheader("合計")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("部屋代 合計", f"{room_grand:,} 円")
-        c2.metric("設備 合計", f"{equipment_grand:,} 円")
-        c3.metric("技術者 合計", f"{tech_grand:,} 円")
-        c4.metric("インターネット 合計", f"{internet_grand:,} 円")
-        c5.metric("総額（全部）", f"{room_grand + equipment_grand + tech_grand + internet_grand:,} 円")
+        render_kpis(room_total, equipment_grand, tech_grand, internet_total)
 
         st.divider()
         st.subheader("内訳（日別）")
         df_break = pd.DataFrame(breakdown_rows)
+
+        if not df_break.empty:
+            try:
+                df_break["日付"] = pd.to_datetime(df_break["日付"])
+                df_break = df_break.sort_values(["日付", "種別", "品目"]).reset_index(drop=True)
+                df_break["日付"] = df_break["日付"].dt.date
+            except Exception:
+                pass
+
         st.dataframe(df_break, use_container_width=True)
 
         st.divider()
