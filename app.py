@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 
 import pandas as pd
 import streamlit as st
@@ -54,11 +54,12 @@ def parse_list_cell(cell: str) -> List[str]:
     """
     "A,B" / "A|B" / "A、B" などを許容
     空や '*' は ['*'] を返す（全対象の意味）
+    ※ applies_to_rooms 用（requires_item_ids には使わない）
     """
     s = normalize_str(cell)
     if s == "" or s == "*" or s.lower() == "all":
         return ["*"]
-    for sep in ["|", "、", "，", ";"]:
+    for sep in ["|", "、", "，", ";", "；"]:
         s = s.replace(sep, ",")
     xs = [x.strip() for x in s.split(",") if x.strip()]
     return xs if xs else ["*"]
@@ -114,7 +115,7 @@ class EquipmentItem:
     unit: str
     price_per_slot: int
     price_once_yen: int
-    requires: List[str]
+    requires_item_ids: str  # ← FIX: 生文字列を保持（OR '|' を潰さない）
     notes: str
     is_countable: int
     is_power_item: int
@@ -179,8 +180,6 @@ def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[
 
     items: Dict[str, EquipmentItem] = {}
     for _, r in master_df.iterrows():
-        req = parse_list_cell(r["requires_item_ids"])
-        req = [x for x in req if x != "*"]
         items[r["item_id"]] = EquipmentItem(
             item_id=r["item_id"],
             item_name=r["item_name"],
@@ -188,7 +187,7 @@ def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[
             unit=r["unit"],
             price_per_slot=int(r["price_per_slot"]),
             price_once_yen=int(r["price_once_yen"]),
-            requires=req,
+            requires_item_ids=r["requires_item_ids"],  # ← FIX
             notes=r["notes"],
             is_countable=int(r["is_countable"]),
             is_power_item=int(r["is_power_item"]),
@@ -221,16 +220,98 @@ def slot_to_multiplier(slot: str) -> int:
     return mapping.get(slot, 1)
 
 
-def collect_required_items(selected_item_ids: List[str], items: Dict[str, EquipmentItem]) -> List[str]:
-    selected_set = set(selected_item_ids)
-    added = True
-    while added:
-        added = False
-        for iid in list(selected_set):
-            for req in items.get(iid, EquipmentItem(iid, "", "", "", 0, 0, [], "", 1, 0)).requires:
-                if req and req not in selected_set:
+# -------------------------
+# FIX: requires_item_ids の OR('|') 対応 + pa_c/pa_d 自動判定
+# -------------------------
+CONF_PA_C_ROOMS: Set[str] = {"大会議室", "小会議室"}
+CONF_PA_D_ROOMS: Set[str] = {"第6会議室", "第7会議室", "第8会議室"}
+
+
+def parse_requires_groups(cell: str) -> List[List[str]]:
+    """
+    requires_item_ids を解析して「AND の並び（グループ）」を返す。
+    - カンマ/読点/セミコロン区切り：AND（全部必要）
+    - '|' 区切り：OR（どれか1つ必要）
+    例:
+      "pa_c|pa_d" -> [["pa_c","pa_d"]]
+      "x,pa_c|pa_d" -> [["x"],["pa_c","pa_d"]]
+    """
+    s = normalize_str(cell)
+    if s == "" or s == "*" or s.lower() == "all":
+        return []
+    for sep in ["、", "，", ";", "；"]:
+        s = s.replace(sep, ",")
+    tokens = [t.strip() for t in s.split(",") if t.strip()]
+    groups: List[List[str]] = []
+    for tok in tokens:
+        if "|" in tok:
+            opts = [x.strip() for x in tok.split("|") if x.strip()]
+            if opts:
+                groups.append(opts)
+        else:
+            groups.append([tok])
+    return groups
+
+
+def resolve_or_group(options: List[str], selected_rooms: Set[str]) -> List[str]:
+    """
+    ORグループ(options)から、採用する依存item_idを返す。
+    - pa_c|pa_d は部屋ルールで決める
+    - その他のORは先頭を採用（必要ならルール追加）
+    """
+    if not options:
+        return []
+
+    opts_set = set(options)
+
+    # pa_c|pa_d の自動判定
+    if "pa_c" in opts_set and "pa_d" in opts_set:
+        need_c = bool(selected_rooms & CONF_PA_C_ROOMS)
+        need_d = CONF_PA_D_ROOMS.issubset(selected_rooms)
+
+        chosen: List[str] = []
+        # 混在予約では両方必要になり得るので両方返す
+        if need_c:
+            chosen.append("pa_c")
+        if need_d:
+            chosen.append("pa_d")
+
+        # どちらにも当てはまらない時は安全側で先頭
+        if not chosen:
+            chosen.append(options[0])
+        return chosen
+
+    # デフォルト：ORは1つだけ採用
+    return [options[0]]
+
+
+def collect_required_items(selected_item_ids: List[str], items: Dict[str, EquipmentItem], selected_rooms: List[str]) -> List[str]:
+    """
+    FIX:
+    - requires_item_ids の '|' を OR として扱う
+    - pa_c|pa_d は部屋ルールで自動判定
+    """
+    selected_set: Set[str] = set(selected_item_ids)
+    room_set: Set[str] = set([normalize_str(r) for r in selected_rooms if normalize_str(r)])
+    queue: List[str] = list(selected_item_ids)
+
+    while queue:
+        iid = queue.pop()
+        it = items.get(iid)
+        if it is None:
+            continue
+
+        groups = parse_requires_groups(it.requires_item_ids)
+        for g in groups:
+            chosen = resolve_or_group(g, room_set) if len(g) >= 2 else g
+            for req in chosen:
+                req = normalize_str(req)
+                if not req:
+                    continue
+                if req not in selected_set:
                     selected_set.add(req)
-                    added = True
+                    queue.append(req)
+
     return list(selected_set)
 
 
@@ -250,6 +331,7 @@ def calc_equipment_total_for_day(
     selections: List[Dict],
     items: Dict[str, EquipmentItem],
     group_meta: Dict[str, GroupMeta],
+    selected_rooms: List[str],  # ← FIX: 部屋ルール判定用に追加
 ) -> Tuple[int, pd.DataFrame]:
     """
     事故防止：
@@ -262,12 +344,14 @@ def calc_equipment_total_for_day(
         )
 
     selected_ids = [s["item_id"] for s in selections]
-    full_ids = collect_required_items(selected_ids, items)
+    full_ids = collect_required_items(selected_ids, items, selected_rooms)
 
     existing = {(s["group_id"], s["item_id"]) for s in selections}
     for iid in full_ids:
         if iid not in selected_ids:
-            it = items[iid]
+            it = items.get(iid)
+            if it is None:
+                continue
             key = (it.group_id, it.item_id)
             if key not in existing:
                 selections.append({"group_id": it.group_id, "item_id": it.item_id, "qty": 1, "auto_added": True})
@@ -281,7 +365,10 @@ def calc_equipment_total_for_day(
         if qty <= 0:
             continue
 
-        it = items[iid]
+        it = items.get(iid)
+        if it is None:
+            continue
+
         meta = group_meta.get(it.group_id, GroupMeta(it.group_id, it.group_id, "*", 1, 1))
 
         inherit = bool(meta.default_inherit_room_slot)
@@ -594,7 +681,7 @@ def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], defaul
                     "部屋": room,
                     "区分": default_room_slot,
                     "割増利用": bool(day_business.get(date_str, False)),
-                    # 追加：手動フラグ（ここが今回の肝）
+                    # 追加：手動フラグ
                     "手動区分": False,
                     "手動割増": False,
                 }
@@ -638,12 +725,12 @@ def merge_room_day(
     merged["手動区分"] = merged["手動区分_old"].fillna(merged["手動区分"]).astype(bool)
     merged["手動割増"] = merged["手動割増_old"].fillna(merged["手動割増"]).astype(bool)
 
-    # 区分：手動なら旧を採用、それ以外はbase（=デフォルト）
+    # 区分：手動なら旧を採用、それ以外はbase
     merged.loc[merged["手動区分"], "区分"] = merged.loc[merged["手動区分"], "区分_old"].fillna(
         merged.loc[merged["手動区分"], "区分"]
     )
 
-    # 割増：手動なら旧を採用、それ以外はbase（=日別同期）
+    # 割増：手動なら旧を採用、それ以外はbase
     merged.loc[merged["手動割増"], "割増利用"] = merged.loc[merged["手動割増"], "割増利用_old"].fillna(
         merged.loc[merged["手動割増"], "割増利用"]
     )
@@ -1193,6 +1280,7 @@ def main():
                     selections=[s.copy() for s in selections],
                     items=items,
                     group_meta=group_meta,
+                    selected_rooms=list(rooms),  # ← FIX
                 )
 
             equipment_grand += eq_total
