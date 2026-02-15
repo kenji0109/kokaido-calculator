@@ -222,11 +222,56 @@ def slot_to_multiplier(slot: str) -> int:
     return mapping.get(slot, 1)
 
 
+def _fix_equip_cell(v: object) -> str:
+    s = normalize_str(v)
+    if s == "" or s.lower() == "none":
+        return "利用なし"
+    if s not in EQUIPMENT_TIME_SLOTS:
+        return "利用なし"
+    return s
+
+
+# =========================
+# マイク使用可否ルール（事故防止）
+# =========================
+CONF_678_ROOMS: Set[str] = {"第6会議室", "第7会議室", "第8会議室"}
+
+MIC_FORBIDDEN_ROOMS: Set[str] = {
+    "第1会議室", "第2会議室", "第3会議室", "第4会議室", "第5会議室", "第9会議室",
+    "特別室",
+}
+
+MIC_ITEM_IDS: Set[str] = {"mic_wireless", "mic_wired"}
+
+
+def mic_selected(selections: List[Dict]) -> bool:
+    for s in selections:
+        if normalize_str(s.get("item_id", "")) in MIC_ITEM_IDS and int(s.get("qty", 0)) > 0:
+            return True
+    return False
+
+
+def mic_allowed_for_rooms(active_rooms: Set[str], is_gallery_678: bool) -> Tuple[bool, str]:
+    """
+    - 第1〜5・第9・特別室がその日に含まれる → 不可（安全側：部屋別設備が無いので強制ブロック）
+    - 第6〜8が絡む → ギャラリーON かつ その日に6/7/8全部使う時だけ可
+    """
+    forbidden = sorted(list(active_rooms & MIC_FORBIDDEN_ROOMS))
+    if forbidden:
+        return False, f"マイク不可の部屋が含まれています: {', '.join(forbidden)}"
+
+    if active_rooms & CONF_678_ROOMS:
+        if not (is_gallery_678 and CONF_678_ROOMS.issubset(active_rooms)):
+            return False, "第6〜8会議室はギャラリー利用ONかつ、その日に第6/第7/第8を全て利用する場合のみマイク可です"
+
+    return True, ""
+
+
 # =========================
 # requires_item_ids の OR('|') 対応 + pa_c/pa_d の部屋ルール
 # =========================
-CONF_PA_C_ROOMS: Set[str] = {"大会議室", "小会議室"}
-CONF_PA_D_ROOMS: Set[str] = {"第6会議室", "第7会議室", "第8会議室"}
+CONF_PA_C_ROOMS: Set[str] = {"大会議室", "小会議室"}  # PDF: 大会議室・小会議室→C
+CONF_PA_D_ROOMS: Set[str] = {"第6会議室", "第7会議室", "第8会議室"}  # PDF: 第6〜8全て→D（※ギャラリー利用時のみ）
 
 
 def parse_requires_groups(cell: str) -> List[List[str]]:
@@ -255,10 +300,10 @@ def parse_requires_groups(cell: str) -> List[List[str]]:
     return groups
 
 
-def resolve_or_group(options: List[str], selected_rooms: Set[str]) -> List[str]:
+def resolve_or_group(options: List[str], selected_rooms: Set[str], is_gallery_678: bool) -> List[str]:
     """
     ORグループ(options)から採用する依存item_idを返す。
-    - pa_c|pa_d は部屋ルールで自動判定（混在なら両方あり得る）
+    - pa_c|pa_d は部屋ルール + ギャラリー条件で自動判定
     - その他のORは「先頭1つ」を採用（必要ならここにルール追加）
     """
     if not options:
@@ -268,12 +313,11 @@ def resolve_or_group(options: List[str], selected_rooms: Set[str]) -> List[str]:
 
     # pa_c|pa_d の自動判定
     if "pa_c" in opts_set and "pa_d" in opts_set:
-        # 部屋が未選択なら決めようがない → 先頭
         if not selected_rooms:
             return [options[0]]
 
-        need_c = bool(selected_rooms & CONF_PA_C_ROOMS)          # 大会議室/小会議室が含まれる
-        need_d = CONF_PA_D_ROOMS.issubset(selected_rooms)        # 第6-8が全部そろう
+        need_c = bool(selected_rooms & CONF_PA_C_ROOMS)
+        need_d = bool(is_gallery_678) and CONF_PA_D_ROOMS.issubset(selected_rooms)
 
         chosen: List[str] = []
         if need_c:
@@ -292,10 +336,11 @@ def collect_required_items(
     selected_item_ids: List[str],
     items: Dict[str, EquipmentItem],
     selected_rooms: List[str],
+    is_gallery_678: bool,
 ) -> List[str]:
     """
     - requires_item_ids の '|' を OR として扱う
-    - pa_c|pa_d は部屋ルールで選ぶ
+    - pa_c|pa_d は部屋ルール + ギャラリー条件で選ぶ
     """
     selected_set: Set[str] = set(selected_item_ids)
     room_set: Set[str] = set([normalize_str(r) for r in selected_rooms if normalize_str(r)])
@@ -309,7 +354,7 @@ def collect_required_items(
 
         groups = parse_requires_groups(it.requires_item_ids)
         for g in groups:
-            chosen = resolve_or_group(g, room_set) if len(g) >= 2 else g
+            chosen = resolve_or_group(g, room_set, is_gallery_678) if len(g) >= 2 else g
             for req in chosen:
                 req = normalize_str(req)
                 if not req:
@@ -324,7 +369,6 @@ def collect_required_items(
 # =========================
 # 付属マイク枠（無料充当：ワイヤレス優先）
 # =========================
-# 拡声装置に「マイク1本付属」がある前提で、ここに対象PAを列挙
 PA_INCLUDED_MIC_ALLOWANCE: Dict[str, int] = {
     "pa_c": 1,
     "pa_d": 1,
@@ -333,7 +377,6 @@ PA_INCLUDED_MIC_ALLOWANCE: Dict[str, int] = {
     # "pa_b": 1,
 }
 
-# CSVの item_id に合わせる（あなたの想定：mic_wireless / mic_wired）
 MIC_ITEM_ID_WIRELESS = "mic_wireless"
 MIC_ITEM_ID_WIRED = "mic_wired"
 
@@ -353,7 +396,6 @@ def apply_included_mic_allowance(
 
     by_id: Dict[str, Dict] = {s["item_id"]: s for s in selections}
 
-    # 付属枠の合計（拡声装置qtyに応じて増える）
     allowance = 0
     for pa_id, n in PA_INCLUDED_MIC_ALLOWANCE.items():
         if pa_id in by_id:
@@ -408,21 +450,8 @@ def apply_included_mic_allowance(
     _consume(MIC_ITEM_ID_WIRED, "有線マイク")
 
     # qtyが0になったものは消す
-    new_selections = []
-    for s in selections:
-        if int(s.get("qty", 0)) > 0:
-            new_selections.append(s)
-
+    new_selections = [s for s in selections if int(s.get("qty", 0)) > 0]
     return new_selections, free_rows
-
-
-def _fix_equip_cell(v: object) -> str:
-    s = normalize_str(v)
-    if s == "" or s.lower() == "none":
-        return "利用なし"
-    if s not in EQUIPMENT_TIME_SLOTS:
-        return "利用なし"
-    return s
 
 
 def calc_equipment_total_for_day(
@@ -432,7 +461,8 @@ def calc_equipment_total_for_day(
     selections: List[Dict],
     items: Dict[str, EquipmentItem],
     group_meta: Dict[str, GroupMeta],
-    selected_rooms: List[str],  # ← pa_c/pa_d 判定用
+    selected_rooms_day: List[str],
+    is_gallery_678: bool,
 ) -> Tuple[int, pd.DataFrame]:
     """
     事故防止：
@@ -445,7 +475,7 @@ def calc_equipment_total_for_day(
         )
 
     selected_ids = [s["item_id"] for s in selections]
-    full_ids = collect_required_items(selected_ids, items, selected_rooms)
+    full_ids = collect_required_items(selected_ids, items, selected_rooms_day, is_gallery_678)
 
     existing = {(s["group_id"], s["item_id"]) for s in selections}
     for iid in full_ids:
@@ -769,10 +799,6 @@ def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
 
 
 def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], default_room_slot: str) -> pd.DataFrame:
-    """
-    重要：部屋×日テーブルは「計算の唯一入力」。
-    ただし、日別の割増を“同期”するために、手動フラグを持たせる。
-    """
     rows = []
     day_business = _day_business_map(days_df)
 
@@ -802,11 +828,6 @@ def merge_room_day(
     selected_rooms: List[str],
     default_room_slot: str,
 ) -> pd.DataFrame:
-    """
-    同期ルール：
-    - 手動フラグFalseのセルは、日別デフォルトで上書き（=一括割増が効く）
-    - 手動フラグTrueのセルは、ユーザー指定を保持（=個別に利用なし/割増OFFが効く）
-    """
     base = build_room_day_base(days_df, selected_rooms, default_room_slot)
     if current is None or current.empty:
         return base
@@ -1034,6 +1055,14 @@ def main():
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
         rooms = st.multiselect("部屋（複数OK）", room_candidates, default=[])
+
+        # 6-8が関わる場合だけ表示（状態はrun時にも使う）
+        is_gallery_678 = False
+        if set(rooms) & CONF_678_ROOMS:
+            is_gallery_678 = st.checkbox(
+                "第6〜8会議室はギャラリー利用（拡声装置・マイク使用可）",
+                value=False,
+            )
 
         default_room_slot = st.selectbox("部屋の区分（新規追加の初期値）", TIME_SLOTS, index=TIME_SLOTS.index("全日"))
         is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
@@ -1358,27 +1387,69 @@ def main():
         equipment_grand = 0
         tech_grand = 0
 
+        # room_day_df の正規化（安全）
+        if not room_day_df.empty:
+            for c in ["日付", "部屋", "区分"]:
+                if c in room_day_df.columns:
+                    room_day_df[c] = room_day_df[c].map(normalize_str)
+
+        any_mic = mic_selected(selections)
+
         for _, day in df_days_calc.iterrows():
             d = pd.Timestamp(day["日付"])
+            day_str = normalize_str(day["日付"])
 
             raw_equip = normalize_str(day.get("設備デフォ区分", ""))
             equipment_default_slot_day = _fix_equip_cell(raw_equip)
 
             tech_slot_day = normalize_str(day.get("技術者区分", "")) or tech_slot_fallback or "全日"
 
-            # 設備
-            if equipment_default_slot_day == "利用なし":
+            # その日に「実際に使う部屋」だけを抽出（利用なし除外）
+            active_rooms_day: List[str] = []
+            if not room_day_df.empty and {"日付", "部屋", "区分", "休館日"}.issubset(set(room_day_df.columns)):
+                m = (
+                    (room_day_df["日付"] == day_str)
+                    & (room_day_df["区分"] != "利用なし")
+                    & (room_day_df["休館日"] == False)
+                )
+                active_rooms_day = room_day_df[m]["部屋"].map(normalize_str).unique().tolist()
+
+            active_rooms_set = set(active_rooms_day)
+
+            # その日、部屋が1つも使われてないなら（安全側）設備も技術者も「日別の区分はあるが実運用なし」扱いに近いので、設備はスキップ
+            # ※技術者は日別区分で課金したい運用もあり得るので、ここでは設備のみスキップする
+            if not active_rooms_day:
                 eq_total, eq_df = 0, pd.DataFrame()
             else:
-                eq_total, eq_df = calc_equipment_total_for_day(
-                    day_slot_default=equipment_default_slot_day,
-                    global_fallback_slot=global_fallback_slot,
-                    group_overrides=group_overrides,
-                    selections=[s.copy() for s in selections],
-                    items=items,
-                    group_meta=group_meta,
-                    selected_rooms=list(rooms),
-                )
+                # 設備
+                if equipment_default_slot_day == "利用なし":
+                    eq_total, eq_df = 0, pd.DataFrame()
+                else:
+                    # マイクが選ばれている場合は、その日構成で使用可否をチェック（事故防止：不可なら止める）
+                    if any_mic:
+                        ok, reason = mic_allowed_for_rooms(active_rooms_set, bool(is_gallery_678))
+                        if not ok:
+                            st.error(
+                                f"【マイク使用不可】{day_str} の部屋構成では、マイク／拡声装置は使用できません。\n"
+                                f"- 当日使用部屋: {', '.join(sorted(active_rooms_set))}\n"
+                                f"- 理由: {reason}\n\n"
+                                "👉 対応例：\n"
+                                "・その日の『設備デフォ区分』を「利用なし」にする（設備計算をしない日として扱う）\n"
+                                "・期間を分けて計算する（マイクを使う日だけ別見積）\n"
+                                "・部屋×日テーブルの利用なし/部屋構成を見直す"
+                            )
+                            st.stop()
+
+                    eq_total, eq_df = calc_equipment_total_for_day(
+                        day_slot_default=equipment_default_slot_day,
+                        global_fallback_slot=global_fallback_slot,
+                        group_overrides=group_overrides,
+                        selections=[s.copy() for s in selections],
+                        items=items,
+                        group_meta=group_meta,
+                        selected_rooms_day=active_rooms_day,  # ★ここが重要：期間全体じゃなく当日の実使用部屋
+                        is_gallery_678=bool(is_gallery_678),
+                    )
 
             equipment_grand += eq_total
             if not eq_df.empty:
@@ -1399,7 +1470,7 @@ def main():
                         }
                     )
 
-            # 技術者
+            # 技術者（従来通り：日別設定ベース）
             tech_total, tech_df = calc_stage_tech_total_for_day(tech_slot_day, int(tech_people))
             tech_grand += tech_total
             if not tech_df.empty:
