@@ -1094,10 +1094,360 @@ def main():
         # ------- フォーム（確定ボタン方式） -------
         st.info("✅ 表を編集したら、下の『この表の変更を反映（確定）』を押してね（ラグ事故防止）")
 
-        with st.form("room_day_form", clear_on_submit=False):
+                with st.form("room_day_form", clear_on_submit=False):
+            # 編集用（手動フラグはUIに出さない：事故防止＆見た目をスッキリ）
+            display_cols = ["日付", "部屋", "区分", "割増利用", "土日祝", "祝日名", "休館日"]
+            editor_df = view_df[display_cols].copy()
+
             edited_room_day_tmp = st.data_editor(
-                view_df,
+                editor_df,
                 use_container_width=True,
                 num_rows="fixed",
+                key=f"room_day_editor_{room_day_key}",
                 column_config={
-                    "日付": st.column_config_
+                    "日付": st.column_config.TextColumn(disabled=True),
+                    "部屋": st.column_config.TextColumn(disabled=True),
+                    "土日祝": st.column_config.TextColumn(disabled=True),
+                    "祝日名": st.column_config.TextColumn(disabled=True),
+                    "休館日": st.column_config.CheckboxColumn(disabled=True),
+                    "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
+                    "割増利用": st.column_config.CheckboxColumn(),
+                },
+            )
+
+            submitted = st.form_submit_button("この表の変更を反映（確定）")
+
+        # ---- 変更反映（確定） ----
+        if submitted:
+            full_df = st.session_state[room_day_key].copy()
+            for c in ["日付", "部屋"]:
+                full_df[c] = full_df[c].map(normalize_str)
+
+            for _, rr in edited_room_day_tmp.iterrows():
+                k_date = normalize_str(rr["日付"])
+                k_room = normalize_str(rr["部屋"])
+                mask = (full_df["日付"] == k_date) & (full_df["部屋"] == k_room)
+                if not mask.any():
+                    continue
+
+                new_slot = normalize_str(rr["区分"])
+                new_biz = bool(rr["割増利用"])
+
+                old_slot = normalize_str(full_df.loc[mask, "区分"].iloc[0])
+                old_biz = bool(full_df.loc[mask, "割増利用"].iloc[0])
+
+                if new_slot != old_slot:
+                    full_df.loc[mask, "区分"] = new_slot
+                    full_df.loc[mask, "手動区分"] = True
+
+                if new_biz != old_biz:
+                    full_df.loc[mask, "割増利用"] = new_biz
+                    full_df.loc[mask, "手動割増"] = True
+
+            st.session_state[room_day_key] = full_df
+            st.success("✅ 反映しました！")
+
+        # ---- お助け：同期に戻したい時（この表示範囲だけ）----
+        if st.button("（この表示範囲）手動フラグを解除して日別同期に戻す", key=f"reset_manual_{room_day_key}"):
+            full_df = st.session_state[room_day_key].copy()
+            for c in ["日付", "部屋"]:
+                full_df[c] = full_df[c].map(normalize_str)
+
+            # base（同期値）を作って、該当行だけ差し戻し
+            base_df = build_room_day_base(edited_days, list(rooms), default_room_slot)
+            for c in ["日付", "部屋"]:
+                base_df[c] = base_df[c].map(normalize_str)
+
+            keys = set(zip(view_df["日付"].map(normalize_str), view_df["部屋"].map(normalize_str)))
+
+            for (k_date, k_room) in keys:
+                m_full = (full_df["日付"] == k_date) & (full_df["部屋"] == k_room)
+                m_base = (base_df["日付"] == k_date) & (base_df["部屋"] == k_room)
+                if not m_full.any() or not m_base.any():
+                    continue
+                full_df.loc[m_full, "区分"] = base_df.loc[m_base, "区分"].iloc[0]
+                full_df.loc[m_full, "割増利用"] = bool(base_df.loc[m_base, "割増利用"].iloc[0])
+                full_df.loc[m_full, "手動区分"] = False
+                full_df.loc[m_full, "手動割増"] = False
+
+            st.session_state[room_day_key] = full_df
+            st.success("✅ 同期に戻しました！")
+
+    # ===== 左カラムここまで =====
+
+    with right:
+        st.subheader("2) 設備・技術者・インターネット → 計算")
+
+        if not rooms:
+            st.info("左側で部屋を選択すると、ここで設備/技術者/ネットを設定できます👌")
+            st.stop()
+
+        # ---- マイク/拡声装置：事故防止（混在時はロック）----
+        st.markdown("### マイク/拡声装置（事故防止）")
+
+        has_678_any = any(r in MIC_D_ROOMS for r in rooms)
+        gallery_678 = st.checkbox(
+            "第6〜8会議室はギャラリー利用（第6+第7+第8を全て選択した場合のみ）",
+            value=False,
+            disabled=not has_678_any,
+            key=f"gallery_678_{start_date}_{end_date}",
+        )
+
+        eligible_rooms, mic_reasons = infer_mic_eligible_rooms(list(rooms), gallery_678)
+
+        # 最も無難：混在時（マイク可/不可が混ざる）= 設備UIが部屋紐付けできないのでロック
+        mic_ui_enabled = bool(rooms) and set(rooms).issubset(set(eligible_rooms))
+
+        if mic_reasons:
+            st.warning(" / ".join(mic_reasons))
+
+        if mic_ui_enabled:
+            st.success(f"✅ マイク入力OK（対象部屋: {', '.join(eligible_rooms)}）")
+        else:
+            st.info("🔒 マイク系はロックします（部屋紐付けできず誤見積になりやすい為）\n"
+                    "→ マイク見積は「マイクOK部屋だけ選んで別計算」→ 合算が安全です👌")
+
+        # ---- 設備（一般）----
+        st.markdown("### 設備（共通/部屋別）")
+
+        # applicable items を作る
+        selected_rooms_set = set(rooms)
+
+        def _group_applies(meta: GroupMeta, selected_rooms_: set) -> bool:
+            applies = parse_list_cell(meta.applies_to_rooms)
+            if "*" in applies:
+                return True
+            return bool(set(applies) & selected_rooms_)
+
+        applicable_item_ids: List[str] = []
+        for iid, it in items.items():
+            meta = group_meta.get(it.group_id)
+            ok = True
+            if meta:
+                ok = _group_applies(meta, selected_rooms_set)
+            if not ok:
+                continue
+            if (not mic_ui_enabled) and (iid in MIC_RELATED_ITEM_IDS):
+                continue
+            applicable_item_ids.append(iid)
+
+        # ラベル作成（検索しやすく）
+        label_to_id: Dict[str, str] = {}
+        options: List[str] = []
+        for iid in applicable_item_ids:
+            it = items[iid]
+            gname = group_meta.get(it.group_id).group_name if it.group_id in group_meta else it.group_id
+            label = f"{gname}｜{it.item_name}"
+            # まれに重複するのでユニーク化
+            if label in label_to_id:
+                label = f"{label}（{iid}）"
+            label_to_id[label] = iid
+            options.append(label)
+        options = sorted(options)
+
+        equip_state_key = f"equip_selected_{start_date}_{end_date}"
+        if equip_state_key not in st.session_state:
+            st.session_state[equip_state_key] = []
+
+        selected_labels = st.multiselect(
+            "設備を選択（検索できます）",
+            options=options,
+            default=[x for x in st.session_state[equip_state_key] if x in options],
+            key=f"equip_ms_{start_date}_{end_date}",
+        )
+        st.session_state[equip_state_key] = selected_labels
+
+        # qty map
+        qty_key = f"equip_qty_{start_date}_{end_date}"
+        if qty_key not in st.session_state:
+            st.session_state[qty_key] = {}  # item_id -> qty
+
+        # 選択リストから編集用DF
+        rows_e = []
+        for lab in selected_labels:
+            iid = label_to_id.get(lab)
+            if not iid:
+                continue
+            it = items[iid]
+            gname = group_meta.get(it.group_id).group_name if it.group_id in group_meta else it.group_id
+            cur_qty = int(st.session_state[qty_key].get(iid, 1))
+            if it.is_countable == 0:
+                cur_qty = 1
+            rows_e.append({"品目": it.item_name, "グループ": gname, "数量": cur_qty, "item_id": iid, "group_id": it.group_id})
+
+        equip_df = pd.DataFrame(rows_e)
+
+        if not equip_df.empty:
+            edited_equip_df = st.data_editor(
+                equip_df[["品目", "グループ", "数量", "item_id", "group_id"]],
+                use_container_width=True,
+                num_rows="fixed",
+                key=f"equip_editor_{start_date}_{end_date}",
+                column_config={
+                    "品目": st.column_config.TextColumn(disabled=True),
+                    "グループ": st.column_config.TextColumn(disabled=True),
+                    "数量": st.column_config.NumberColumn(min_value=0, step=1),
+                    "item_id": st.column_config.TextColumn(disabled=True),
+                    "group_id": st.column_config.TextColumn(disabled=True),
+                },
+            )
+
+            # qty 反映（事故防止：countable=0 は 1固定 / micロック時は0）
+            new_map = dict(st.session_state[qty_key])
+            for _, rr in edited_equip_df.iterrows():
+                iid = normalize_str(rr["item_id"])
+                q = int(rr["数量"] or 0)
+                it = items.get(iid)
+                if not it:
+                    continue
+                if it.is_countable == 0:
+                    q = 1
+                if (not mic_ui_enabled) and (iid in MIC_RELATED_ITEM_IDS):
+                    q = 0
+                new_map[iid] = max(0, q)
+            st.session_state[qty_key] = new_map
+
+            # グループoverride（選択されているグループだけ）
+            st.markdown("#### 設備の区分（グループ別の上書き：任意）")
+            override_key = f"equip_overrides_{start_date}_{end_date}"
+            if override_key not in st.session_state:
+                st.session_state[override_key] = {}
+
+            group_ids_in_use = sorted(set(edited_equip_df["group_id"].tolist()))
+            overrides = dict(st.session_state[override_key])
+
+            for gid in group_ids_in_use:
+                gname = group_meta.get(gid).group_name if gid in group_meta else gid
+                cur = overrides.get(gid, "")
+                choice = st.selectbox(
+                    f"{gname} の区分",
+                    options=["（日別デフォルト）"] + TIME_SLOTS,
+                    index=(0 if cur == "" else (["（日別デフォルト）"] + TIME_SLOTS).index(cur)),
+                    key=f"ov_{override_key}_{gid}",
+                )
+                overrides[gid] = "" if choice == "（日別デフォルト）" else choice
+
+            st.session_state[override_key] = overrides
+
+        else:
+            edited_equip_df = pd.DataFrame(columns=["item_id", "group_id"])
+
+        # ---- 技術者 ----
+        st.markdown("### 舞台設備技術者")
+        tech_people = st.number_input("人数（全日程に適用：MVP）", min_value=0, max_value=50, value=0, step=1, key=f"tech_people_{start_date}_{end_date}")
+
+        # ---- Internet ----
+        st.markdown("### インターネット")
+        use_pocket_wifi = st.checkbox("ポケットWi-Fi（2,800円/日）", value=False, key=f"net_pocket_{start_date}_{end_date}")
+        use_fixed_line = st.checkbox("常設回線（初日18,000円、2日目以降2,000円）", value=False, key=f"net_fixed_{start_date}_{end_date}")
+        use_temp_line = st.checkbox("仮設回線（5,000円/回 + 別途見積）", value=False, key=f"net_temp_{start_date}_{end_date}")
+
+        st.divider()
+
+        # ---- 計算 ----
+        if room_day_key not in st.session_state or st.session_state[room_day_key].empty:
+            st.error("部屋×日テーブルが空です。左側で部屋と日付を設定してください。")
+            st.stop()
+
+        room_day_df = st.session_state[room_day_key].copy()
+
+        # rooms
+        room_total, room_detail_df = calc_rooms_from_room_day(prices_df, room_day_df)
+
+        # equipment
+        equip_total = 0
+        equip_parts = []
+
+        # selections を構築
+        selections: List[Dict] = []
+        if qty_key in st.session_state:
+            qty_map = st.session_state[qty_key]
+            for iid, q in qty_map.items():
+                if int(q) <= 0:
+                    continue
+                if iid not in items:
+                    continue
+                it = items[iid]
+                selections.append({"group_id": it.group_id, "item_id": iid, "qty": int(q), "auto_added": False})
+
+        overrides = st.session_state.get(f"equip_overrides_{start_date}_{end_date}", {})
+        group_overrides = {k: v for k, v in overrides.items() if v}
+
+        # requires_context（pa_c|pa_d 自動解決）
+        requires_context = {
+            "need_pa_c": bool(set(rooms) & MIC_C_ROOMS),
+            "need_pa_d": bool(MIC_D_ROOMS.issubset(set(rooms)) and gallery_678),
+        }
+
+        df_days_calc = edited_days.copy()
+        for _, drow in df_days_calc.iterrows():
+            if bool(drow.get("休館日", False)):
+                continue
+
+            day_slot_default = normalize_str(drow.get("設備デフォ区分", "利用なし"))
+            # 「利用なし」の日は設備を全て0扱い（事故防止）
+            if day_slot_default == "利用なし":
+                continue
+
+            day_total, day_df = calc_equipment_total_for_day(
+                day_slot_default=day_slot_default,
+                global_fallback_slot=default_room_slot,
+                group_overrides=group_overrides,
+                selections=[dict(x) for x in selections],  # 日ごとにコピー（auto追加が混ざってもOK）
+                items=items,
+                group_meta=group_meta,
+                requires_context=requires_context,
+            )
+            equip_total += day_total
+            if not day_df.empty:
+                day_df.insert(0, "日付", pd.Timestamp(drow["日付"]).date())
+                equip_parts.append(day_df)
+
+        equip_detail_df = pd.concat(equip_parts, ignore_index=True) if equip_parts else pd.DataFrame(
+            columns=["日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"]
+        )
+
+        # tech
+        tech_total = 0
+        tech_parts = []
+        for _, drow in df_days_calc.iterrows():
+            if bool(drow.get("休館日", False)):
+                continue
+            slot = normalize_str(drow.get("技術者区分", default_room_slot))
+            day_total, day_df = calc_stage_tech_total_for_day(slot, int(tech_people))
+            tech_total += day_total
+            if not day_df.empty:
+                day_df.insert(0, "日付", pd.Timestamp(drow["日付"]).date())
+                tech_parts.append(day_df)
+        tech_detail_df = pd.concat(tech_parts, ignore_index=True) if tech_parts else pd.DataFrame(columns=["日付", "種別", "区分", "人数", "単価(1名)", "小計"])
+
+        # internet
+        internet_total, internet_df = calc_internet_total(
+            df_days_calc=df_days_calc[~df_days_calc["休館日"]],
+            selected_rooms=list(rooms),
+            use_pocket_wifi=bool(use_pocket_wifi),
+            use_fixed_line=bool(use_fixed_line),
+            use_temp_line=bool(use_temp_line),
+        )
+
+        render_kpis(room_total, equip_total, tech_total, internet_total)
+
+        tabs = st.tabs(["内訳（部屋）", "内訳（設備）", "内訳（技術者）", "内訳（インターネット）"])
+
+        with tabs[0]:
+            st.dataframe(room_detail_df, use_container_width=True)
+            if room_detail_df["単価"].isna().any():
+                st.warning("⚠️ prices.csv に見つからない組み合わせがありました（単価=None）。CSVの部屋名/区分/平日土日祝/通常割増の一致を確認してね。")
+
+        with tabs[1]:
+            st.dataframe(equip_detail_df, use_container_width=True)
+
+        with tabs[2]:
+            st.dataframe(tech_detail_df, use_container_width=True)
+
+        with tabs[3]:
+            st.dataframe(internet_df, use_container_width=True)
+
+
+if __name__ == "__main__":
+    main()
