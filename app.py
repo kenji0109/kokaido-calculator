@@ -65,31 +65,43 @@ def _safe_set(s: Set[str]) -> Set[str]:
     return set([x for x in s if x])
 
 
+# ★変更点：MIC_NEVER_ROOMS が混在しても即NGにしない（ユーザー要望）
 def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tuple[bool, str]:
     """
-    その日の「使用部屋構成」からマイク可否を判定
-    事故防止のため：
-      - MIC_NEVER_ROOMS が混ざっていたら、その日はマイク不可
-      - それ以外で、(大会議室 or 小会議室) が含まれれば OK（拡声装置C）
-      - それ以外で、第6-8全て + ギャラリー利用なら OK（拡声装置D）
-      - それ以外は不可
+    その日の「使用部屋構成」からマイク可否を判定（改善版）
+
+    変更点：
+      - MIC_NEVER_ROOMS が混ざっていても、それだけでマイク不可にしない（ユーザー要望）
+      - ただし注意喚起は reason に残す（事故防止）
+    判定：
+      - (大会議室 or 小会議室) が含まれれば OK（拡声装置C）
+      - 第6-8全て + ギャラリー利用なら OK（拡声装置D）
+      - 第6〜8が一部だけ、またはギャラリーOFFなら NG
+      - それ以外は NG
     """
     rooms_used = _safe_set(rooms_used)
 
-    ng = sorted(list(rooms_used & MIC_NEVER_ROOMS))
-    if ng:
-        return False, f"マイク不可の部屋が含まれています: {', '.join(ng)}"
+    never = sorted(list(rooms_used & MIC_NEVER_ROOMS))
+    never_note = f"（※マイク不可の部屋も同日に含まれています: {', '.join(never)}）" if never else ""
 
+    # OK条件：拡声装置C（大会議室/小会議室）
     if rooms_used & MIC_C_ROOMS:
-        return True, "拡声装置Cの対象（大会議室/小会議室）"
+        return True, f"拡声装置Cの対象（大会議室/小会議室）{never_note}"
 
+    # OK条件：拡声装置D（第6+第7+第8 + ギャラリー利用）
     if MIC_D_ROOMS.issubset(rooms_used) and gallery_678:
-        return True, "拡声装置Dの対象（第6+第7+第8 + ギャラリー利用）"
+        return True, f"拡声装置Dの対象（第6+第7+第8 + ギャラリー利用）{never_note}"
 
+    # 第6〜8が絡むが条件不足
     if rooms_used & MIC_D_ROOMS:
-        return False, "第6〜8会議室は「第6+第7+第8を全て」+「ギャラリー利用」の場合のみマイクOK"
+        return False, f"第6〜8会議室は「第6+第7+第8を全て」+「ギャラリー利用」の場合のみマイクOK{never_note}"
 
-    return False, "マイク対象部屋が含まれていません"
+    # マイク不可の部屋しかない場合（※この場合はNG）
+    if rooms_used & MIC_NEVER_ROOMS:
+        return False, f"マイク不可の部屋のみです{never_note}"
+
+    # それ以外：対象部屋なし
+    return False, "マイク対象部屋（大会議室/小会議室 or 第6〜8条件）が含まれていません"
 
 
 # =========================
@@ -1288,10 +1300,9 @@ def main():
 
         if mic_any_denied:
             denied_days = [d for d, ok in mic_ok_map.items() if not ok]
-            # 直近だけ見せる（長いと見づらい）
             show_days = denied_days[:7]
-            st.error(
-                "【マイク注意】マイク不可の日があります。不可日はマイク/拡声装置は課金0＆入力も止めます。\n"
+            st.warning(
+                "【マイク注意】マイク不可の日があります。不可日はマイク/拡声装置は課金0で計算されます。\n"
                 f"- マイク不可日（抜粋）: {', '.join(show_days)}"
                 + (f" …他 {max(0, len(denied_days)-len(show_days))}日" if len(denied_days) > len(show_days) else "")
             )
@@ -1300,7 +1311,7 @@ def main():
         # 設備 UI（グループごと）
         # -------------------------
         st.markdown("### 設備（数量）")
-        st.caption("※マイク関連（拡声装置/有線/ワイヤレス）は、マイク可の日が1日も無い場合は入力を停止します。")
+        st.caption("※マイク関連（拡声装置/有線/ワイヤレス）は、マイク可の日が1日も無い場合のみ入力を停止します。")
 
         selected_rooms_now = sorted(list(set([normalize_str(x) for x in rooms])))
         selected_rooms_set = set(selected_rooms_now)
@@ -1389,6 +1400,25 @@ def main():
 
                     if int(qty) > 0:
                         selections.append({"group_id": it.group_id, "item_id": it.item_id, "qty": int(qty), "auto_added": False})
+
+        # ★追加：マイク選択×不可日あり の強警告（計算前）
+        mic_selected = any(s["item_id"] in MIC_RELATED_ITEM_IDS for s in selections)
+        if mic_selected and mic_any_denied:
+            denied_days = [d for d, ok in mic_ok_map.items() if not ok]
+            show_days = denied_days[:7]
+
+            st.error(
+                "🚨【重要】マイク/拡声装置を選択していますが、期間内にマイク不可日があります。\n"
+                "不可日はマイク関連（有線/ワイヤレス/拡声装置）は **計算上 0円** になります（事故防止仕様）。\n"
+                f"- マイク不可日（抜粋）: {', '.join(show_days)}"
+                + (f" …他 {max(0, len(denied_days)-len(show_days))}日" if len(denied_days) > len(show_days) else "")
+            )
+
+            with st.expander("不可日の理由（詳細）", expanded=False):
+                for d in denied_days[:20]:
+                    st.write(f"- {d}: {mic_reason_map.get(d, '')}")
+                if len(denied_days) > 20:
+                    st.write(f"…他 {len(denied_days)-20}日")
 
         st.divider()
 
