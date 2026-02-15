@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -24,6 +24,45 @@ EQUIPMENT_MASTER_CSV = DATA_DIR / "equipment_master.csv"
 TIME_SLOTS = ["午前", "午後", "夜間", "午前-午後", "午後-夜間", "全日", "延長30分"]
 EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 ROOM_SLOTS_WITH_NONE = ["利用なし"] + TIME_SLOTS
+
+# =========================
+# マイク/拡声装置：事故防止ルール（MVPはハードコードが無難）
+# =========================
+MIC_NEVER_ROOMS = {"第1会議室", "第2会議室", "第3会議室", "第4会議室", "第5会議室", "第9会議室", "特別室"}
+MIC_C_ROOMS = {"大会議室", "小会議室"}  # 拡声装置C
+MIC_D_ROOMS = {"第6会議室", "第7会議室", "第8会議室"}  # 3室すべて＆ギャラリー利用で拡声装置D
+
+# CSVの item_id 想定（あなたの置き換えCSVに合わせる）
+MIC_WIRED_ID = "mic_wired"
+MIC_WIRELESS_ID = "mic_wireless"
+PA_C_ID = "pa_c"
+PA_D_ID = "pa_d"
+
+# 「拡声装置にマイク1本付属」を控除する対象
+PA_ITEMS_WITH_INCLUDED_MIC = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}  # A/Bが存在しても害なし
+MIC_ITEMS = {MIC_WIRED_ID, MIC_WIRELESS_ID}
+
+# マイク関連として“入力停止”する item_id
+MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_C_ID, PA_D_ID}
+
+
+def infer_mic_eligible_rooms(selected_rooms: List[str], gallery_678: bool) -> Tuple[List[str], List[str]]:
+    s = set(selected_rooms)
+    eligible = set()
+    reasons: List[str] = []
+
+    eligible |= (s & MIC_C_ROOMS)
+
+    if MIC_D_ROOMS.issubset(s) and gallery_678:
+        eligible |= (s & MIC_D_ROOMS)
+    elif any(r in MIC_D_ROOMS for r in s):
+        reasons.append("第6〜8会議室は「第6+第7+第8を全て選択」かつ「ギャラリー利用」の場合のみマイクOK（拡声装置D）")
+
+    ng = sorted(s & MIC_NEVER_ROOMS)
+    if ng:
+        reasons.append(f"マイク不可の部屋が含まれています: {', '.join(ng)}（※マイクは可の部屋スコープでのみ計算）")
+
+    return sorted(eligible), reasons
 
 
 # =========================
@@ -52,19 +91,40 @@ def _to_int(x) -> int:
 
 def parse_list_cell(cell: str) -> List[str]:
     """
-    applies_to_rooms 等用：
     "A,B" / "A|B" / "A、B" などを許容
     空や '*' は ['*'] を返す（全対象の意味）
-
-    ※注意：requires_item_ids には使わない（'|' を OR として残したい）
     """
     s = normalize_str(cell)
     if s == "" or s == "*" or s.lower() == "all":
         return ["*"]
-    for sep in ["|", "、", "，", ";", "；"]:
+    for sep in ["|", "、", "，", ";"]:
         s = s.replace(sep, ",")
     xs = [x.strip() for x in s.split(",") if x.strip()]
     return xs if xs else ["*"]
+
+
+def parse_requires_groups(cell: str) -> List[List[str]]:
+    """
+    requires_item_ids 用：
+    - "," は AND（複数必須）
+    - "|" は OR（いずれか1つ）
+    例:
+      "a,b" -> [["a"],["b"]]
+      "pa_c|pa_d" -> [["pa_c","pa_d"]]
+      "x,pa_c|pa_d" -> [["x"],["pa_c","pa_d"]]
+    """
+    s = normalize_str(cell)
+    if s == "" or s == "*" or s.lower() == "all":
+        return []
+    for sep in ["、", "，", ";"]:
+        s = s.replace(sep, ",")
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    groups: List[List[str]] = []
+    for p in parts:
+        alts = [a.strip() for a in p.split("|") if a.strip()]
+        if alts:
+            groups.append(alts)
+    return groups
 
 
 # =========================
@@ -117,7 +177,7 @@ class EquipmentItem:
     unit: str
     price_per_slot: int
     price_once_yen: int
-    requires_item_ids: str  # ← 生文字列（OR '|' を潰さない）
+    requires_groups: List[List[str]]  # AND/OR混在
     notes: str
     is_countable: int
     is_power_item: int
@@ -182,6 +242,7 @@ def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[
 
     items: Dict[str, EquipmentItem] = {}
     for _, r in master_df.iterrows():
+        req_groups = parse_requires_groups(r["requires_item_ids"])
         items[r["item_id"]] = EquipmentItem(
             item_id=r["item_id"],
             item_name=r["item_name"],
@@ -189,7 +250,7 @@ def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[
             unit=r["unit"],
             price_per_slot=int(r["price_per_slot"]),
             price_once_yen=int(r["price_once_yen"]),
-            requires_item_ids=r["requires_item_ids"],
+            requires_groups=req_groups,
             notes=r["notes"],
             is_countable=int(r["is_countable"]),
             is_power_item=int(r["is_power_item"]),
@@ -222,6 +283,59 @@ def slot_to_multiplier(slot: str) -> int:
     return mapping.get(slot, 1)
 
 
+def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optional[str]:
+    """
+    OR候補から「どれを自動追加するか」を決める（事故防止・決め打ち）
+    """
+    opts = set(options)
+
+    # pa_c|pa_d の解決（会議室共通マイク用）
+    if {PA_C_ID, PA_D_ID}.issubset(opts):
+        need_c = bool(ctx.get("need_pa_c", False))
+        need_d = bool(ctx.get("need_pa_d", False))
+
+        if need_c and not need_d:
+            return PA_C_ID
+        if need_d and not need_c:
+            return PA_D_ID
+
+        # 両方必要っぽい／どっちも判断不能 → 事故防止で C を優先（一般ケース）
+        return PA_C_ID if PA_C_ID in opts else options[0]
+
+    # その他のORは先頭を採用（CSV側で並び順を安全側にするのが無難）
+    return options[0] if options else None
+
+
+def collect_required_items(
+    selected_item_ids: List[str],
+    items: Dict[str, EquipmentItem],
+    requires_context: Dict[str, object],
+) -> List[str]:
+    """
+    依存品を自動追加
+    - requires_groups は AND/OR混在
+    - ORは resolve_required_option で 1つだけ選ぶ（全部追加しない）
+    """
+    selected_set = set(selected_item_ids)
+    added = True
+    while added:
+        added = False
+        for iid in list(selected_set):
+            it = items.get(iid)
+            if not it:
+                continue
+
+            for group in it.requires_groups:
+                # group は OR候補（1つでも入ってればOK）
+                if any(opt in selected_set for opt in group):
+                    continue
+                choice = resolve_required_option(group, requires_context)
+                if choice and choice not in selected_set:
+                    selected_set.add(choice)
+                    added = True
+    return list(selected_set)
+
+
 def _fix_equip_cell(v: object) -> str:
     s = normalize_str(v)
     if s == "" or s.lower() == "none":
@@ -231,229 +345,6 @@ def _fix_equip_cell(v: object) -> str:
     return s
 
 
-# =========================
-# マイク使用可否ルール（事故防止）
-# =========================
-CONF_678_ROOMS: Set[str] = {"第6会議室", "第7会議室", "第8会議室"}
-
-MIC_FORBIDDEN_ROOMS: Set[str] = {
-    "第1会議室", "第2会議室", "第3会議室", "第4会議室", "第5会議室", "第9会議室",
-    "特別室",
-}
-
-MIC_ITEM_IDS: Set[str] = {"mic_wireless", "mic_wired"}
-
-
-def mic_selected(selections: List[Dict]) -> bool:
-    for s in selections:
-        if normalize_str(s.get("item_id", "")) in MIC_ITEM_IDS and int(s.get("qty", 0)) > 0:
-            return True
-    return False
-
-
-def mic_allowed_for_rooms(active_rooms: Set[str], is_gallery_678: bool) -> Tuple[bool, str]:
-    """
-    - 第1〜5・第9・特別室がその日に含まれる → 不可（安全側：部屋別設備が無いので強制ブロック）
-    - 第6〜8が絡む → ギャラリーON かつ その日に6/7/8全部使う時だけ可
-    """
-    forbidden = sorted(list(active_rooms & MIC_FORBIDDEN_ROOMS))
-    if forbidden:
-        return False, f"マイク不可の部屋が含まれています: {', '.join(forbidden)}"
-
-    if active_rooms & CONF_678_ROOMS:
-        if not (is_gallery_678 and CONF_678_ROOMS.issubset(active_rooms)):
-            return False, "第6〜8会議室はギャラリー利用ONかつ、その日に第6/第7/第8を全て利用する場合のみマイク可です"
-
-    return True, ""
-
-
-# =========================
-# requires_item_ids の OR('|') 対応 + pa_c/pa_d の部屋ルール
-# =========================
-CONF_PA_C_ROOMS: Set[str] = {"大会議室", "小会議室"}  # PDF: 大会議室・小会議室→C
-CONF_PA_D_ROOMS: Set[str] = {"第6会議室", "第7会議室", "第8会議室"}  # PDF: 第6〜8全て→D（※ギャラリー利用時のみ）
-
-
-def parse_requires_groups(cell: str) -> List[List[str]]:
-    """
-    requires_item_ids を解析して「AND の並び（グループ）」を返す。
-    - カンマ/読点/セミコロン区切り：AND（全部必要）
-    - '|' 区切り：OR（どれか1つ必要）
-    例:
-      "pa_c|pa_d" -> [["pa_c","pa_d"]]
-      "x,pa_c|pa_d" -> [["x"],["pa_c","pa_d"]]
-    """
-    s = normalize_str(cell)
-    if s == "" or s == "*" or s.lower() == "all":
-        return []
-    for sep in ["、", "，", ";", "；"]:
-        s = s.replace(sep, ",")
-    tokens = [t.strip() for t in s.split(",") if t.strip()]
-    groups: List[List[str]] = []
-    for tok in tokens:
-        if "|" in tok:
-            opts = [x.strip() for x in tok.split("|") if x.strip()]
-            if opts:
-                groups.append(opts)
-        else:
-            groups.append([tok])
-    return groups
-
-
-def resolve_or_group(options: List[str], selected_rooms: Set[str], is_gallery_678: bool) -> List[str]:
-    """
-    ORグループ(options)から採用する依存item_idを返す。
-    - pa_c|pa_d は部屋ルール + ギャラリー条件で自動判定
-    - その他のORは「先頭1つ」を採用（必要ならここにルール追加）
-    """
-    if not options:
-        return []
-
-    opts_set = set(options)
-
-    # pa_c|pa_d の自動判定
-    if "pa_c" in opts_set and "pa_d" in opts_set:
-        if not selected_rooms:
-            return [options[0]]
-
-        need_c = bool(selected_rooms & CONF_PA_C_ROOMS)
-        need_d = bool(is_gallery_678) and CONF_PA_D_ROOMS.issubset(selected_rooms)
-
-        chosen: List[str] = []
-        if need_c:
-            chosen.append("pa_c")
-        if need_d:
-            chosen.append("pa_d")
-
-        # どちらにも該当しない時は安全側で先頭
-        return chosen if chosen else [options[0]]
-
-    # その他：1つだけ採用（デフォルト）
-    return [options[0]]
-
-
-def collect_required_items(
-    selected_item_ids: List[str],
-    items: Dict[str, EquipmentItem],
-    selected_rooms: List[str],
-    is_gallery_678: bool,
-) -> List[str]:
-    """
-    - requires_item_ids の '|' を OR として扱う
-    - pa_c|pa_d は部屋ルール + ギャラリー条件で選ぶ
-    """
-    selected_set: Set[str] = set(selected_item_ids)
-    room_set: Set[str] = set([normalize_str(r) for r in selected_rooms if normalize_str(r)])
-    queue: List[str] = list(selected_item_ids)
-
-    while queue:
-        iid = queue.pop()
-        it = items.get(iid)
-        if it is None:
-            continue
-
-        groups = parse_requires_groups(it.requires_item_ids)
-        for g in groups:
-            chosen = resolve_or_group(g, room_set, is_gallery_678) if len(g) >= 2 else g
-            for req in chosen:
-                req = normalize_str(req)
-                if not req:
-                    continue
-                if req not in selected_set:
-                    selected_set.add(req)
-                    queue.append(req)
-
-    return list(selected_set)
-
-
-# =========================
-# 付属マイク枠（無料充当：ワイヤレス優先）
-# =========================
-PA_INCLUDED_MIC_ALLOWANCE: Dict[str, int] = {
-    "pa_c": 1,
-    "pa_d": 1,
-    # 必要なら追加（PDFで確定したらON）
-    # "pa_a": 1,
-    # "pa_b": 1,
-}
-
-MIC_ITEM_ID_WIRELESS = "mic_wireless"
-MIC_ITEM_ID_WIRED = "mic_wired"
-
-
-def apply_included_mic_allowance(
-    selections: List[Dict],
-    items: Dict[str, EquipmentItem],
-) -> Tuple[List[Dict], List[Dict]]:
-    """
-    拡声装置の“付属マイク枠”を、マイク（ワイヤレス優先）に充当して課金本数を減らす。
-    戻り値:
-      - 課金用に調整した selections
-      - 0円表示用の rows（内訳に出す）
-    """
-    if not selections:
-        return selections, []
-
-    by_id: Dict[str, Dict] = {s["item_id"]: s for s in selections}
-
-    allowance = 0
-    for pa_id, n in PA_INCLUDED_MIC_ALLOWANCE.items():
-        if pa_id in by_id:
-            q = int(by_id[pa_id].get("qty", 0))
-            if q > 0:
-                allowance += n * q
-
-    if allowance <= 0:
-        return selections, []
-
-    free_rows: List[Dict] = []
-
-    def _consume(target_item_id: str, label_fallback: str) -> None:
-        nonlocal allowance
-        if allowance <= 0:
-            return
-        sel = by_id.get(target_item_id)
-        if not sel:
-            return
-        q = int(sel.get("qty", 0))
-        if q <= 0:
-            return
-
-        used = min(q, allowance)
-        sel["qty"] = q - used
-        allowance -= used
-
-        if used > 0:
-            it = items.get(target_item_id)
-            label = it.item_name if it else label_fallback
-            gid = it.group_id if it else ""
-            free_rows.append(
-                {
-                    "種別": "設備",
-                    "グループ": gid,
-                    "品目": f"{label}（付属に充当）",
-                    "課金タイプ": "付属（0円）",
-                    "区分": "（付属）",
-                    "数量": used,
-                    "単価(1区分)": 0,
-                    "倍率": 0,
-                    "区分小計": 0,
-                    "一回課金": 0,
-                    "小計": 0,
-                    "備考": "拡声装置に付属のマイク1本枠を充当（ワイヤレス優先）",
-                    "自動追加": True,
-                }
-            )
-
-    # ✅ ワイヤレス優先
-    _consume(MIC_ITEM_ID_WIRELESS, "ワイヤレスマイク")
-    _consume(MIC_ITEM_ID_WIRED, "有線マイク")
-
-    # qtyが0になったものは消す
-    new_selections = [s for s in selections if int(s.get("qty", 0)) > 0]
-    return new_selections, free_rows
-
-
 def calc_equipment_total_for_day(
     day_slot_default: str,
     global_fallback_slot: str,
@@ -461,13 +352,14 @@ def calc_equipment_total_for_day(
     selections: List[Dict],
     items: Dict[str, EquipmentItem],
     group_meta: Dict[str, GroupMeta],
-    selected_rooms_day: List[str],
-    is_gallery_678: bool,
+    requires_context: Dict[str, object],
 ) -> Tuple[int, pd.DataFrame]:
     """
     事故防止：
     - price_per_slot > 0 のときだけ区分課金（倍率あり）
     - price_per_slot == 0 かつ price_once_yen > 0 は区分なし単価（倍率なし）
+    - 依存品 requires は ORを1つだけ選ぶ
+    - 拡声装置の「付属マイク1本」をマイク数量から控除（二重請求防止・安全側で有線→ワイヤレス優先）
     """
     if not selections:
         return 0, pd.DataFrame(
@@ -475,39 +367,65 @@ def calc_equipment_total_for_day(
         )
 
     selected_ids = [s["item_id"] for s in selections]
-    full_ids = collect_required_items(selected_ids, items, selected_rooms_day, is_gallery_678)
+    full_ids = collect_required_items(selected_ids, items, requires_context)
 
     existing = {(s["group_id"], s["item_id"]) for s in selections}
     for iid in full_ids:
         if iid not in selected_ids:
-            it = items.get(iid)
-            if it is None:
-                continue
+            it = items[iid]
             key = (it.group_id, it.item_id)
             if key not in existing:
                 selections.append({"group_id": it.group_id, "item_id": it.item_id, "qty": 1, "auto_added": True})
-                existing.add(key)
 
-    # ✅ 付属マイク枠を無料充当（ワイヤレス優先）
-    selections, free_rows = apply_included_mic_allowance(selections, items)
+    # ---- 付属マイク控除：数量調整（ここで最終 selections を見て控除） ----
+    qty_map: Dict[str, int] = {}
+    for s in selections:
+        iid = s.get("item_id")
+        q = int(s.get("qty", 0) or 0)
+        if not iid:
+            continue
+        qty_map[iid] = qty_map.get(iid, 0) + max(0, q)
+
+    included_mics = sum(qty_map.get(pid, 0) for pid in PA_ITEMS_WITH_INCLUDED_MIC)
+    req_wired = qty_map.get(MIC_WIRED_ID, 0)
+    req_wireless = qty_map.get(MIC_WIRELESS_ID, 0)
+
+    # 安全側（過小見積防止）：有線→ワイヤレス優先で付属控除
+    remain = included_mics
+    used_w = min(remain, req_wired)
+    bill_wired = req_wired - used_w
+    remain -= used_w
+
+    used_ww = min(remain, req_wireless)
+    bill_wireless = req_wireless - used_ww
+    remain -= used_ww
+
+    billed_qty_override = {
+        MIC_WIRED_ID: bill_wired,
+        MIC_WIRELESS_ID: bill_wireless,
+    }
+    deducted_note = {
+        MIC_WIRED_ID: used_w,
+        MIC_WIRELESS_ID: used_ww,
+    }
 
     rows = []
     total = 0
 
-    # 0円表示（付属に充当）を先に出す
-    rows.extend(free_rows)
-
     for s in selections:
         iid = s["item_id"]
-        qty = int(s.get("qty", 0))
-        if qty <= 0:
-            continue
-
-        it = items.get(iid)
-        if it is None:
-            continue
-
+        it = items[iid]
         meta = group_meta.get(it.group_id, GroupMeta(it.group_id, it.group_id, "*", 1, 1))
+
+        orig_qty = int(s.get("qty", 0) or 0)
+        if orig_qty <= 0:
+            continue
+
+        # マイクは控除後数量で課金（ただし行は出す）
+        if iid in MIC_ITEMS:
+            qty = int(billed_qty_override.get(iid, orig_qty))
+        else:
+            qty = orig_qty
 
         inherit = bool(meta.default_inherit_room_slot)
         base_slot = day_slot_default if inherit else global_fallback_slot
@@ -543,6 +461,16 @@ def calc_equipment_total_for_day(
 
         total += subtotal
 
+        note = it.notes or ""
+        if iid in PA_ITEMS_WITH_INCLUDED_MIC:
+            note = (note + " / " if note else "") + "マイク1本付属"
+        if iid in MIC_ITEMS:
+            ded = int(deducted_note.get(iid, 0))
+            if ded > 0:
+                note = (note + " / " if note else "") + f"付属マイク控除:{ded}（有線→ワイヤレス優先）"
+            # 選択数量も残す
+            note = (note + " / " if note else "") + f"選択:{orig_qty}→課金:{qty}"
+
         rows.append(
             {
                 "種別": "設備",
@@ -556,7 +484,7 @@ def calc_equipment_total_for_day(
                 "区分小計": per_slot_sub,
                 "一回課金": once_sub,
                 "小計": subtotal,
-                "備考": it.notes,
+                "備考": note,
                 "自動追加": bool(s.get("auto_added", False)),
             }
         )
@@ -799,6 +727,10 @@ def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
 
 
 def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], default_room_slot: str) -> pd.DataFrame:
+    """
+    重要：部屋×日テーブルは「計算の唯一入力」。
+    ただし、日別の割増を“同期”するために、手動フラグを持たせる。
+    """
     rows = []
     day_business = _day_business_map(days_df)
 
@@ -815,6 +747,7 @@ def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], defaul
                     "部屋": room,
                     "区分": default_room_slot,
                     "割増利用": bool(day_business.get(date_str, False)),
+                    # 追加：手動フラグ（ここが今回の肝）
                     "手動区分": False,
                     "手動割増": False,
                 }
@@ -828,6 +761,11 @@ def merge_room_day(
     selected_rooms: List[str],
     default_room_slot: str,
 ) -> pd.DataFrame:
+    """
+    同期ルール：
+    - 手動フラグFalseのセルは、日別デフォルトで上書き（=一括割増が効く）
+    - 手動フラグTrueのセルは、ユーザー指定を保持（=個別に利用なし/割増OFFが効く）
+    """
     base = build_room_day_base(days_df, selected_rooms, default_room_slot)
     if current is None or current.empty:
         return base
@@ -837,8 +775,9 @@ def merge_room_day(
         if c in cur.columns:
             cur[c] = cur[c].map(normalize_str)
 
+    # 旧バージョン互換：手動列がない場合は追加
     if "手動区分" not in cur.columns:
-        cur["手動区分"] = True
+        cur["手動区分"] = True  # 既存は「ユーザーが触った扱い」にして事故を防ぐ
     if "手動割増" not in cur.columns:
         cur["手動割増"] = True
 
@@ -848,17 +787,21 @@ def merge_room_day(
 
     merged = base.merge(cur_small, on=key_cols, how="left", suffixes=("", "_old"))
 
+    # 手動フラグ：旧を引き継ぐ（なければFalse）
     merged["手動区分"] = merged["手動区分_old"].fillna(merged["手動区分"]).astype(bool)
     merged["手動割増"] = merged["手動割増_old"].fillna(merged["手動割増"]).astype(bool)
 
+    # 区分：手動なら旧を採用、それ以外はbase（=デフォルト）
     merged.loc[merged["手動区分"], "区分"] = merged.loc[merged["手動区分"], "区分_old"].fillna(
         merged.loc[merged["手動区分"], "区分"]
     )
 
+    # 割増：手動なら旧を採用、それ以外はbase（=日別同期）
     merged.loc[merged["手動割増"], "割増利用"] = merged.loc[merged["手動割増"], "割増利用_old"].fillna(
         merged.loc[merged["手動割増"], "割増利用"]
     )
 
+    # cleanup
     drop_cols = [c for c in merged.columns if c.endswith("_old")]
     if drop_cols:
         merged.drop(columns=drop_cols, inplace=True)
@@ -1056,14 +999,6 @@ def main():
         room_candidates = sorted(prices_df["room"].unique().tolist())
         rooms = st.multiselect("部屋（複数OK）", room_candidates, default=[])
 
-        # 6-8が関わる場合だけ表示（状態はrun時にも使う）
-        is_gallery_678 = False
-        if set(rooms) & CONF_678_ROOMS:
-            is_gallery_678 = st.checkbox(
-                "第6〜8会議室はギャラリー利用（拡声装置・マイク使用可）",
-                value=False,
-            )
-
         default_room_slot = st.selectbox("部屋の区分（新規追加の初期値）", TIME_SLOTS, index=TIME_SLOTS.index("全日"))
         is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
 
@@ -1165,366 +1100,4 @@ def main():
                 use_container_width=True,
                 num_rows="fixed",
                 column_config={
-                    "日付": st.column_config.TextColumn(disabled=True),
-                    "土日祝": st.column_config.TextColumn(disabled=True),
-                    "祝日名": st.column_config.TextColumn(disabled=True),
-                    "休館日": st.column_config.CheckboxColumn(disabled=True),
-                    "部屋": st.column_config.TextColumn(disabled=True),
-                    "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
-                    "割増利用": st.column_config.CheckboxColumn(),
-                    "手動区分": st.column_config.CheckboxColumn(disabled=True),
-                    "手動割増": st.column_config.CheckboxColumn(disabled=True),
-                },
-            )
-            apply_room_day = st.form_submit_button("この表の変更を反映（確定）")
-
-        if apply_room_day:
-            day_business = _day_business_map(edited_days)
-
-            edited_part = edited_room_day_tmp.copy()
-            edited_part["日付"] = edited_part["日付"].map(normalize_str)
-            edited_part["部屋"] = edited_part["部屋"].map(normalize_str)
-
-            def _fix_room_slot(v):
-                s = normalize_str(v)
-                if s == "" or s.lower() == "none":
-                    return default_room_slot
-                if s not in ROOM_SLOTS_WITH_NONE:
-                    return default_room_slot
-                return s
-
-            edited_part["区分"] = edited_part["区分"].apply(_fix_room_slot)
-            edited_part["割増利用"] = edited_part["割増利用"].astype(bool)
-
-            edited_part["手動区分"] = edited_part["区分"].map(normalize_str) != normalize_str(default_room_slot)
-
-            def _manual_business(row) -> bool:
-                d = normalize_str(row["日付"])
-                day_def = bool(day_business.get(d, False))
-                return bool(row["割増利用"]) != day_def
-
-            edited_part["手動割増"] = edited_part.apply(_manual_business, axis=1)
-
-            full = st.session_state[room_day_key].copy()
-            full["日付"] = full["日付"].map(normalize_str)
-            full["部屋"] = full["部屋"].map(normalize_str)
-
-            if "手動区分" not in full.columns:
-                full["手動区分"] = True
-            if "手動割増" not in full.columns:
-                full["手動割増"] = True
-
-            key_cols = ["日付", "部屋"]
-            merged = full.merge(
-                edited_part[key_cols + ["区分", "割増利用", "手動区分", "手動割増"]],
-                on=key_cols,
-                how="left",
-                suffixes=("", "_new"),
-            )
-
-            for c in ["区分", "割増利用", "手動区分", "手動割増"]:
-                merged[c] = merged[f"{c}_new"].fillna(merged[c])
-            merged.drop(columns=[c for c in merged.columns if c.endswith("_new")], inplace=True)
-
-            st.session_state[room_day_key] = merged
-            st.success("✅ 反映しました！この状態で『計算する』を押してOKです")
-            st.rerun()
-
-        # 設備入力が必要か判定（休館日除外の上で）
-        try:
-            _df_chk = edited_days.copy()
-            _df_chk = _df_chk[_df_chk["休館日"] == False]
-            _equip_vals = _df_chk["設備デフォ区分"].map(normalize_str).tolist()
-
-            def _is_equip_used(v: str) -> bool:
-                vv = (v or "").strip()
-                if vv == "" or vv.lower() == "none":
-                    return False
-                return vv != "利用なし"
-
-            equipment_any_day = any(_is_equip_used(v) for v in _equip_vals)
-        except Exception:
-            equipment_any_day = True
-
-        if not equipment_any_day:
-            st.info("✅ 日別設定がすべて『設備デフォ区分：利用なし』なので、設備入力はロックします（誤入力防止）")
-            for k in list(st.session_state.keys()):
-                if str(k).startswith("qty_"):
-                    st.session_state[k] = 0
-
-        # ========= 設備 =========
-        st.divider()
-        st.subheader("2) 設備（追加）")
-        if not equipment_any_day:
-            st.caption("※この期間は設備計算を行いません（全日：利用なし）")
-
-        global_fallback_slot = st.selectbox(
-            "設備区分のフォールバック（※日別の設備デフォ区分を継承しないグループ用）",
-            TIME_SLOTS,
-            index=TIME_SLOTS.index(default_room_slot),
-            disabled=(not equipment_any_day),
-        )
-        st.caption("※グループoverride不可のグループはロックされます（事故防止）")
-
-        def group_visible(row) -> bool:
-            applicable = parse_list_cell(row["applies_to_rooms"])
-            if "*" in applicable:
-                return True
-            if not rooms:
-                return True
-            return any(r in applicable for r in rooms)
-
-        visible_groups = groups_df[groups_df.apply(group_visible, axis=1)].copy()
-
-        group_overrides: Dict[str, str] = {}
-        selections: List[Dict] = []
-
-        for _, g in visible_groups.iterrows():
-            gid = g["group_id"]
-            gname = g["group_name"]
-            meta = group_meta.get(gid, GroupMeta(gid, gname, "*", 1, 1))
-
-            with st.expander(f"設備グループ：{gname}", expanded=False):
-                col1, col2 = st.columns([1, 1])
-
-                if meta.allowed_slot_override and equipment_any_day:
-                    override = col1.selectbox(
-                        f"{gname} の区分（変更する場合だけ）",
-                        ["(デフォルト)"] + TIME_SLOTS,
-                        index=0,
-                        key=f"override_{gid}",
-                        disabled=(not equipment_any_day),
-                    )
-                    if override != "(デフォルト)":
-                        group_overrides[gid] = override
-                else:
-                    col1.caption("🔒 このグループは区分override不可（事故防止）")
-
-                inherit_text = "日別設備デフォ区分を継承" if meta.default_inherit_room_slot else "継承しない（フォールバック）"
-                col2.caption(f"設定: {inherit_text}")
-
-                group_items = sorted([it for it in items.values() if it.group_id == gid], key=lambda x: x.item_name)
-
-                if not group_items:
-                    st.info("このグループには品目がありません（equipment_master.csvを確認）")
-                else:
-                    for it in group_items:
-                        cA, cB, cC = st.columns([3, 1, 1])
-
-                        if it.price_per_slot > 0:
-                            line = f"**{it.item_name}**（単位:{it.unit} / 1区分:{it.price_per_slot:,}円"
-                            if it.price_once_yen:
-                                line += f" / 1回:{it.price_once_yen:,}円"
-                            line += "）"
-                        elif it.price_once_yen > 0:
-                            line = f"**{it.item_name}**（単位:{it.unit} / 1回:{it.price_once_yen:,}円 / 区分なし）"
-                        else:
-                            line = f"**{it.item_name}**（単位:{it.unit} / 料金未設定）"
-
-                        cA.write(line)
-
-                        qty = cB.number_input(
-                            "数量",
-                            min_value=0,
-                            value=0,
-                            step=1,
-                            key=f"qty_{gid}_{it.item_id}",
-                            disabled=(not equipment_any_day),
-                        )
-                        if equipment_any_day and qty > 0:
-                            selections.append({"group_id": gid, "item_id": it.item_id, "qty": int(qty)})
-
-                        if it.notes:
-                            cC.caption(it.notes)
-
-        # ========= 技術者 =========
-        st.divider()
-        st.subheader("3) 舞台設備技術者")
-        tech_people = st.number_input("技術者人数（1名あたり課金）", min_value=0, value=0, step=1)
-        tech_slot_fallback = st.selectbox(
-            "技術者区分のフォールバック（※日別設定が空のときだけ）",
-            TIME_SLOTS,
-            index=TIME_SLOTS.index(default_room_slot),
-        )
-
-        # ========= インターネット =========
-        st.divider()
-        st.subheader("4) インターネット（将来込みを想定・暫定実装）")
-        use_pocket_wifi = st.checkbox("① ポケットWi-Fi貸出（2,800円/日）", value=False)
-        use_fixed_line = st.checkbox("② 常設回線（初日18,000円、連続2日目以降2,000円/日、フロア毎）", value=False)
-        use_temp_line = st.checkbox("③ 仮設回線（5,000円/回＋別途見積、フロア毎）", value=False)
-
-        st.divider()
-        run = st.button("計算する", type="primary")
-
-    with right:
-        st.subheader("結果")
-        if not run:
-            st.info("左で条件を入れて「計算する」を押してね 😎")
-            st.stop()
-
-        df_days = st.session_state[days_key].copy()
-        room_day_df = st.session_state.get(room_day_key, pd.DataFrame()).copy()
-
-        excluded = df_days[df_days["休館日"] == True].copy()
-        df_days_calc = df_days[df_days["休館日"] == False].copy()
-
-        if df_days_calc.empty:
-            st.error("計算対象の日がありません（全日休館日など）")
-            st.stop()
-
-        if not excluded.empty:
-            st.warning(f"休館日として除外した日数: {len(excluded)}（例: {excluded.iloc[0]['日付']} …）")
-
-        # 部屋（テーブルをそのまま計算）
-        room_total, room_break = calc_rooms_from_room_day(prices_df, room_day_df)
-
-        breakdown_rows = []
-        if not room_break.empty:
-            breakdown_rows.extend(room_break.to_dict("records"))
-
-        # 設備・技術者は日別設定ベースで日ごとに計算
-        equipment_grand = 0
-        tech_grand = 0
-
-        # room_day_df の正規化（安全）
-        if not room_day_df.empty:
-            for c in ["日付", "部屋", "区分"]:
-                if c in room_day_df.columns:
-                    room_day_df[c] = room_day_df[c].map(normalize_str)
-
-        any_mic = mic_selected(selections)
-
-        for _, day in df_days_calc.iterrows():
-            d = pd.Timestamp(day["日付"])
-            day_str = normalize_str(day["日付"])
-
-            raw_equip = normalize_str(day.get("設備デフォ区分", ""))
-            equipment_default_slot_day = _fix_equip_cell(raw_equip)
-
-            tech_slot_day = normalize_str(day.get("技術者区分", "")) or tech_slot_fallback or "全日"
-
-            # その日に「実際に使う部屋」だけを抽出（利用なし除外）
-            active_rooms_day: List[str] = []
-            if not room_day_df.empty and {"日付", "部屋", "区分", "休館日"}.issubset(set(room_day_df.columns)):
-                m = (
-                    (room_day_df["日付"] == day_str)
-                    & (room_day_df["区分"] != "利用なし")
-                    & (room_day_df["休館日"] == False)
-                )
-                active_rooms_day = room_day_df[m]["部屋"].map(normalize_str).unique().tolist()
-
-            active_rooms_set = set(active_rooms_day)
-
-            # その日、部屋が1つも使われてないなら（安全側）設備も技術者も「日別の区分はあるが実運用なし」扱いに近いので、設備はスキップ
-            # ※技術者は日別区分で課金したい運用もあり得るので、ここでは設備のみスキップする
-            if not active_rooms_day:
-                eq_total, eq_df = 0, pd.DataFrame()
-            else:
-                # 設備
-                if equipment_default_slot_day == "利用なし":
-                    eq_total, eq_df = 0, pd.DataFrame()
-                else:
-                    # マイクが選ばれている場合は、その日構成で使用可否をチェック（事故防止：不可なら止める）
-                    if any_mic:
-                        ok, reason = mic_allowed_for_rooms(active_rooms_set, bool(is_gallery_678))
-                        if not ok:
-                            st.error(
-                                f"【マイク使用不可】{day_str} の部屋構成では、マイク／拡声装置は使用できません。\n"
-                                f"- 当日使用部屋: {', '.join(sorted(active_rooms_set))}\n"
-                                f"- 理由: {reason}\n\n"
-                                "👉 対応例：\n"
-                                "・その日の『設備デフォ区分』を「利用なし」にする（設備計算をしない日として扱う）\n"
-                                "・期間を分けて計算する（マイクを使う日だけ別見積）\n"
-                                "・部屋×日テーブルの利用なし/部屋構成を見直す"
-                            )
-                            st.stop()
-
-                    eq_total, eq_df = calc_equipment_total_for_day(
-                        day_slot_default=equipment_default_slot_day,
-                        global_fallback_slot=global_fallback_slot,
-                        group_overrides=group_overrides,
-                        selections=[s.copy() for s in selections],
-                        items=items,
-                        group_meta=group_meta,
-                        selected_rooms_day=active_rooms_day,  # ★ここが重要：期間全体じゃなく当日の実使用部屋
-                        is_gallery_678=bool(is_gallery_678),
-                    )
-
-            equipment_grand += eq_total
-            if not eq_df.empty:
-                for _, r in eq_df.iterrows():
-                    breakdown_rows.append(
-                        {
-                            "日付": d.date(),
-                            "種別": r["種別"],
-                            "グループ": r.get("グループ", ""),
-                            "品目": r["品目"],
-                            "区分": r["区分"],
-                            "数量/人数": r["数量"],
-                            "単価": int(r.get("単価(1区分)", 0)) if pd.notna(r.get("単価(1区分)", 0)) else 0,
-                            "倍率": r.get("倍率", 0),
-                            "小計": r.get("小計", 0),
-                            "自動追加": bool(r.get("自動追加", False)),
-                            "備考": f"{r.get('課金タイプ','')} / {r.get('備考','')}",
-                        }
-                    )
-
-            # 技術者（従来通り：日別設定ベース）
-            tech_total, tech_df = calc_stage_tech_total_for_day(tech_slot_day, int(tech_people))
-            tech_grand += tech_total
-            if not tech_df.empty:
-                tr = tech_df.iloc[0].to_dict()
-                breakdown_rows.append(
-                    {
-                        "日付": d.date(),
-                        "種別": "技術者",
-                        "グループ": "",
-                        "品目": "舞台設備技術者",
-                        "区分": tr["区分"],
-                        "数量/人数": tr["人数"],
-                        "単価": tr["単価(1名)"],
-                        "倍率": 1,
-                        "小計": tr["小計"],
-                        "自動追加": False,
-                        "備考": "",
-                    }
-                )
-
-        # インターネット（期間合算）
-        internet_total, internet_df = calc_internet_total(
-            df_days_calc=df_days_calc,
-            selected_rooms=list(rooms),
-            use_pocket_wifi=use_pocket_wifi,
-            use_fixed_line=use_fixed_line,
-            use_temp_line=use_temp_line,
-        )
-
-        st.divider()
-        render_kpis(room_total, equipment_grand, tech_grand, internet_total)
-
-        st.divider()
-        st.subheader("内訳（日別）")
-        df_break = pd.DataFrame(breakdown_rows)
-
-        if not df_break.empty:
-            try:
-                df_break["日付"] = pd.to_datetime(df_break["日付"])
-                df_break = df_break.sort_values(["日付", "種別", "品目"]).reset_index(drop=True)
-                df_break["日付"] = df_break["日付"].dt.date
-            except Exception:
-                pass
-
-        st.dataframe(df_break, use_container_width=True)
-
-        st.divider()
-        st.subheader("インターネット内訳（参考）")
-        if internet_df.empty:
-            st.info("インターネット未選択（または対象部屋なし）")
-        else:
-            st.dataframe(internet_df, use_container_width=True)
-            st.caption("※常設回線の段階料金は「連続利用（休館日で途切れる）」を基準にしています。")
-
-
-if __name__ == "__main__":
-    main()
+                    "日付": st.column_config_
