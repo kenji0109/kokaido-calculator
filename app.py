@@ -1139,6 +1139,48 @@ def render_kpis(room_total: int, equipment_total: int, tech_total: int, internet
     c5.metric("総額", yen(grand_total))
 
 # =========================
+# 表示改善：金額列を¥でフォーマット＆列幅を広げる
+# =========================
+def _coerce_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    return out
+
+def show_df_money(df: pd.DataFrame, money_cols: List[str], extra_config: Optional[Dict[str, object]] = None):
+    """
+    st.dataframe で金額が「…」になりにくい表示にする
+    """
+    if df is None:
+        st.info("データがありません。")
+        return
+    df2 = _coerce_numeric(df, money_cols)
+
+    col_cfg: Dict[str, object] = {}
+    for c in money_cols:
+        if c in df2.columns:
+            col_cfg[c] = st.column_config.NumberColumn(
+                c,
+                format="¥%,d",
+                width="large",
+            )
+
+    if "日付" in df2.columns:
+        col_cfg.setdefault("日付", st.column_config.DateColumn("日付", format="YYYY/MM/DD", width="medium"))
+
+    if extra_config:
+        col_cfg.update(extra_config)
+
+    st.dataframe(df2, use_container_width=True, hide_index=True, column_config=col_cfg)
+
+def render_total_big(room_total: int, equipment_total: int, tech_total: int, internet_total: int):
+    grand_total = int(room_total) + int(equipment_total) + int(tech_total) + int(internet_total)
+    st.markdown("### 合計（概算）")
+    st.markdown(f"## ¥{grand_total:,.0f}")
+    st.caption(f"内訳：部屋 ¥{room_total:,.0f} / 設備 ¥{equipment_total:,.0f} / 技術者 ¥{tech_total:,.0f} / インターネット ¥{internet_total:,.0f}")
+
+# =========================
 # Main App
 # =========================
 def main():
@@ -1239,9 +1281,13 @@ def main():
             edited_days = st.session_state[days_key]
             st.dataframe(edited_days, use_container_width=True)
 
-        # 休館日警告は「一言だけ」
-        if not edited_days.empty and bool(edited_days["休館日"].any()):
-            st.warning("休館日です。")
+        # ✅ 休館日警告：赤文字＋具体日付（事故防止）
+        if not edited_days.empty and "休館日" in edited_days.columns and bool(edited_days["休館日"].any()):
+            closed_list = edited_days.loc[edited_days["休館日"], "日付"].astype(str).tolist()
+            closed_list = [normalize_str(x) for x in closed_list if normalize_str(x)]
+            if closed_list:
+                msg = " / ".join([f"{d} は休館日" for d in closed_list])
+                st.error(msg)
 
         st.divider()
         st.subheader("部屋×日 テーブル（個別調整）")
@@ -1502,21 +1548,50 @@ def main():
             )
 
             st.subheader("結果")
+
+            # ✅ 合計を表の外で大きく表示（…対策の要）
+            render_total_big(room_total, equipment_total, tech_total, internet_total)
+
+            # KPIも残す（社内向けに見やすい）
             render_kpis(room_total, equipment_total, tech_total, internet_total)
 
             tab_all, tab_rooms, tab_eq, tab_tech, tab_net = st.tabs(["明細（全部）", "部屋", "設備", "技術者", "インターネット"])
 
             with tab_rooms:
-                st.dataframe(room_df, use_container_width=True)
+                show_df_money(
+                    room_df,
+                    money_cols=["単価", "小計"],
+                    extra_config={
+                        "品目": st.column_config.TextColumn("品目", width="large"),
+                        "備考": st.column_config.TextColumn("備考", width="large"),
+                    },
+                )
 
             with tab_eq:
-                st.dataframe(equipment_df, use_container_width=True)
+                show_df_money(
+                    equipment_df,
+                    money_cols=["単価(1区分)", "区分小計", "一回課金", "小計"],
+                    extra_config={
+                        "品目": st.column_config.TextColumn("品目", width="large"),
+                        "備考": st.column_config.TextColumn("備考", width="large"),
+                    },
+                )
 
             with tab_tech:
-                st.dataframe(tech_df, use_container_width=True)
+                show_df_money(
+                    tech_df,
+                    money_cols=["単価(1名)", "小計"],
+                )
 
             with tab_net:
-                st.dataframe(internet_df, use_container_width=True)
+                show_df_money(
+                    internet_df,
+                    money_cols=["小計"],
+                    extra_config={
+                        "品目": st.column_config.TextColumn("品目", width="large"),
+                        "備考": st.column_config.TextColumn("備考", width="large"),
+                    },
+                )
 
             with tab_all:
                 frames = []
@@ -1542,11 +1617,20 @@ def main():
                     n = internet_df.copy()
                     n["カテゴリ"] = "インターネット"
                     n = n.rename(columns={"品目": "名称"})
-                    frames.append(n.rename(columns={"小計": "小計"})[["日付", "カテゴリ", "名称", "フロア", "小計", "備考"]])
+                    # 表示列名を揃える（フロア→区分）
+                    n = n.rename(columns={"フロア": "区分"})
+                    frames.append(n.rename(columns={"小計": "小計"})[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
 
                 if frames:
                     all_df = pd.concat(frames, ignore_index=True)
-                    st.dataframe(all_df, use_container_width=True)
+                    show_df_money(
+                        all_df,
+                        money_cols=["小計"],
+                        extra_config={
+                            "名称": st.column_config.TextColumn("名称", width="large"),
+                            "備考": st.column_config.TextColumn("備考", width="large"),
+                        },
+                    )
                 else:
                     st.info("明細がありません（部屋×日が全て「利用なし」など）。")
 
