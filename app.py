@@ -17,7 +17,7 @@ except Exception:
 # =========================
 # App / Paths
 # =========================
-APP_TITLE = "公会堂料金電卓 MVP（部屋×日編集＋設備＋技術者＋インターネット）"
+APP_TITLE = "公会堂料金電卓 （部屋×日編集＋設備＋技術者＋インターネット）"
 DATA_DIR = Path(__file__).parent / "data"
 
 PRICES_CSV = DATA_DIR / "prices.csv"
