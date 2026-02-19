@@ -33,8 +33,15 @@ DATE_FMT = "%Y/%m/%d"
 # =========================
 # Time slots
 # =========================
+# ※ TIME_SLOTS は設備/技術者にも使う（延長30分を含めてOK）
 TIME_SLOTS = ["午前", "午後", "夜間", "午前-午後", "午後-夜間", "全日", "延長30分"]
-ROOM_SLOTS_WITH_NONE = ["利用なし"] + TIME_SLOTS
+
+# 部屋の「基本区分」（延長は別列で扱うので除外）
+ROOM_BASE_SLOTS = ["午前", "午後", "夜間", "午前-午後", "午後-夜間", "全日"]
+ROOM_SLOTS_WITH_NONE = ["利用なし"] + ROOM_BASE_SLOTS
+
+# 部屋の「延長」欄（追加料金として別計算）
+ROOM_EXTENSION_SLOTS = ["なし", "前延長30分", "後延長30分", "前後延長30分"]
 
 # 設備は「利用なし」を許可（=倍率0で課金停止）
 EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
@@ -46,30 +53,21 @@ TECH_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 # マイク/拡声装置：事故防止ルール（MVPはハードコードが無難）
 # =========================
 MIC_NEVER_ROOMS = {"第1会議室", "第2会議室", "第3会議室", "第4会議室", "第5会議室", "第9会議室", "特別室"}
-
-# 拡声装置の部屋対応（最新ルール）
-MIC_A_ROOMS = {"大集会室"}                 # 拡声装置A
-MIC_B_ROOMS = {"中集会室"}                 # 拡声装置B
-MIC_C_ROOMS = {"大会議室", "小集会室"}      # 拡声装置C（大会議室/小集会室）
+MIC_C_ROOMS = {"大会議室", "小集会室"}  # 拡声装置C（大会議室/小集会室）
 MIC_D_ROOMS = {"第6会議室", "第7会議室", "第8会議室"}  # 3室すべて＆ギャラリー利用で拡声装置D
 
 # CSVの item_id 想定（あなたのCSVに合わせる）
 MIC_WIRED_ID = "mic_wired"
 MIC_WIRELESS_ID = "mic_wireless"
-
-PA_A_ID = "pa_a"
-PA_B_ID = "pa_b"
 PA_C_ID = "pa_c"
 PA_D_ID = "pa_d"
 
 # 「拡声装置にマイク1本付属」を控除する対象
-PA_ITEMS_WITH_INCLUDED_MIC = {PA_A_ID, PA_B_ID, PA_C_ID, PA_D_ID}
-
+PA_ITEMS_WITH_INCLUDED_MIC = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}  # A/Bが存在しても害なし
 MIC_ITEMS = {MIC_WIRED_ID, MIC_WIRELESS_ID}
 
 # マイク関連として“日別判定”する item_id（安全側でPAも含める）
-MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_A_ID, PA_B_ID, PA_C_ID, PA_D_ID}
-
+MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_C_ID, PA_D_ID}
 
 # =========================
 # Utility
@@ -369,39 +367,27 @@ def slot_to_multiplier(slot: str) -> int:
     return mapping.get(slot, 1)
 
 
-def resolve_required_option(options: List[str], ctx: Dict[str, object], items: Dict[str, EquipmentItem]) -> Optional[str]:
+def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optional[str]:
     """
     OR候補から「どれを自動追加するか」を決める（事故防止・決め打ち）
     ※ 日別コンテキストで、必要なPAが明確な場合はそれを優先
-    ※ items に存在しないIDは選ばない（CSV未登録でも落ちないように）
     """
-    # まずCSVに存在する候補だけに絞る
-    opts = [o for o in options if o in items]
-    if not opts:
-        return None
+    opts = set(options)
 
-    set_opts = set(opts)
+    # pa_c|pa_d の解決
+    if {PA_C_ID, PA_D_ID}.issubset(opts):
+        need_c = bool(ctx.get("need_pa_c", False))
+        need_d = bool(ctx.get("need_pa_d", False))
 
-    # PA（拡声装置）候補が含まれている場合：日別needに合わせて選ぶ
-    need_map = {
-        PA_A_ID: "need_pa_a",
-        PA_B_ID: "need_pa_b",
-        PA_C_ID: "need_pa_c",
-        PA_D_ID: "need_pa_d",
-    }
+        if need_d and not need_c and PA_D_ID in opts:
+            return PA_D_ID
+        if need_c and not need_d and PA_C_ID in opts:
+            return PA_C_ID
 
-    # 優先順（事故防止：D→A→B→C）
-    pa_priority = [PA_D_ID, PA_A_ID, PA_B_ID, PA_C_ID]
-    if any(pid in set_opts for pid in need_map.keys()):
-        for pid in pa_priority:
-            if pid in set_opts and bool(ctx.get(need_map[pid], False)):
-                return pid
+        # 判断不能 → 安全側で C（あれば）
+        return PA_C_ID if PA_C_ID in opts else (options[0] if options else None)
 
-        # needが立ってない/判断不能 → CSVにある先頭
-        return opts[0]
-
-    # PA以外のORは先頭
-    return opts[0]
+    return options[0] if options else None
 
 
 def collect_required_items(
@@ -412,9 +398,8 @@ def collect_required_items(
     """
     依存品を自動追加
     - ORは resolve_required_option で 1つだけ選ぶ
-    - itemsに無いIDは追加しない（安全）
     """
-    selected_set = set([iid for iid in selected_item_ids if iid in items])
+    selected_set = set(selected_item_ids)
     added = True
     while added:
         added = False
@@ -426,8 +411,8 @@ def collect_required_items(
             for group in it.requires_groups:
                 if any(opt in selected_set for opt in group):
                     continue
-                choice = resolve_required_option(group, requires_context, items)
-                if choice and choice in items and choice not in selected_set:
+                choice = resolve_required_option(group, requires_context)
+                if choice and choice not in selected_set:
                     selected_set.add(choice)
                     added = True
     return list(selected_set)
@@ -451,6 +436,15 @@ def _fix_room_slot(v: object, default_slot: str) -> str:
     return s
 
 
+def _fix_room_extension(v: object) -> str:
+    s = normalize_str(v)
+    if s == "" or s.lower() == "none":
+        return "なし"
+    if s not in ROOM_EXTENSION_SLOTS:
+        return "なし"
+    return s
+
+
 def _fix_tech_slot(v: object) -> str:
     s = normalize_str(v)
     if s == "" or s.lower() == "none":
@@ -466,26 +460,18 @@ def _safe_set(s: Set[str]) -> Set[str]:
 
 def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tuple[bool, str]:
     """
-    その日の「使用部屋構成」からマイク可否を判定（最新ルール）
+    その日の「使用部屋構成」からマイク可否を判定
     判定：
-      - 大集会室 → OK（拡声装置A）
-      - 中集会室 → OK（拡声装置B）
-      - 大会議室 or 小集会室 → OK（拡声装置C）
-      - 第6-8全て + ギャラリー利用 → OK（拡声装置D）
+      - (大会議室 or 小集会室) が含まれれば OK（拡声装置C）
+      - 第6-8全て + ギャラリー利用なら OK（拡声装置D）
       - 第6〜8が一部だけ、またはギャラリーOFFなら NG
-      - マイク対象外の部屋だけなら NG
+      - マイク不可の部屋だけなら NG
       - それ以外は NG
     """
     rooms_used = _safe_set(rooms_used)
 
     never = sorted(list(rooms_used & MIC_NEVER_ROOMS))
     never_note = f"（同日にマイク対象外の部屋が含まれています: {', '.join(never)}）" if never else ""
-
-    if rooms_used & MIC_A_ROOMS:
-        return True, f"拡声装置Aの対象（大集会室）{never_note}"
-
-    if rooms_used & MIC_B_ROOMS:
-        return True, f"拡声装置Bの対象（中集会室）{never_note}"
 
     if rooms_used & MIC_C_ROOMS:
         return True, f"拡声装置Cの対象（大会議室/小集会室）{never_note}"
@@ -496,30 +482,22 @@ def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tupl
     if rooms_used & MIC_D_ROOMS:
         return False, f"第6〜8会議室は「第6+第7+第8を全て」かつ「ギャラリー利用」の場合のみマイク対象{never_note}"
 
-    if rooms_used and rooms_used.issubset(MIC_NEVER_ROOMS):
+    if rooms_used & MIC_NEVER_ROOMS:
         return False, f"マイク対象外の部屋のみです{never_note}"
 
-    return False, "マイク対象部屋（大集会室/中集会室/大会議室/小集会室 または 第6〜8条件）が含まれていません"
+    return False, "マイク対象部屋（大会議室/小集会室 または 第6〜8条件）が含まれていません"
 
 
 def _is_mic_related_item_allowed_today(iid: str, ctx: Dict[str, object], mic_allowed_today: bool) -> bool:
     """
     マイク/拡声装置は「日別の部屋構成」で課金可否を決定する。
-    - PA_A: A条件を満たす日だけ
-    - PA_B: B条件を満たす日だけ
     - PA_C: C条件を満たす日だけ
     - PA_D: D条件を満たす日だけ（第6-8同日 + ギャラリー）
     - mic_wired/mic_wireless: その日がマイク対象なら課金
     """
-    need_a = bool(ctx.get("need_pa_a", False))
-    need_b = bool(ctx.get("need_pa_b", False))
     need_c = bool(ctx.get("need_pa_c", False))
     need_d = bool(ctx.get("need_pa_d", False))
 
-    if iid == PA_A_ID:
-        return need_a
-    if iid == PA_B_ID:
-        return need_b
     if iid == PA_C_ID:
         return need_c
     if iid == PA_D_ID:
@@ -739,6 +717,24 @@ def load_prices_df() -> pd.DataFrame:
     return df
 
 
+def extension_to_pricing(ext: str, slots_in_prices: Set[str]) -> Tuple[str, int, str]:
+    """
+    延長列の値 → prices.csv の slot へ変換
+    - prices.csv に「前延長30分」等が存在するならそのまま参照（将来拡張）
+    - 無いなら「延長30分」に寄せる
+    - 前後延長30分は「延長30分×2」
+    """
+    if ext in slots_in_prices:
+        return ext, 1, ""
+
+    if ext == "前後延長30分":
+        return "延長30分", 2, "前後延長30分（延長30分×2回）"
+    if ext in ("前延長30分", "後延長30分"):
+        return "延長30分", 1, f"{ext}（延長30分×1回）"
+
+    return "延長30分", 1, ""
+
+
 # =========================
 # Internet（MVP値：あとでCSV化OK）
 # =========================
@@ -831,14 +827,17 @@ def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], defaul
                     "休館日": bool(drow.get("休館日", False)),
                     "部屋": room,
                     "区分": default_room_slot,
+                    "延長": "なし",
                     "割増利用": bool(day_business.get(date_str, False)),
                     "手動区分": False,
+                    "手動延長": False,
                     "手動割増": False,
                 }
             )
     df = pd.DataFrame(rows)
     if not df.empty:
         df["区分"] = df["区分"].apply(lambda x: _fix_room_slot(x, default_room_slot))
+        df["延長"] = df["延長"].apply(_fix_room_extension)
         df["割増利用"] = df["割増利用"].astype(bool)
     return df
 
@@ -867,18 +866,26 @@ def merge_room_day(
         cur["手動区分"] = True
     if "手動割増" not in cur.columns:
         cur["手動割増"] = True
+    if "延長" not in cur.columns:
+        cur["延長"] = "なし"
+    if "手動延長" not in cur.columns:
+        cur["手動延長"] = False
 
     key_cols = ["日付", "部屋"]
-    keep_cols = key_cols + ["区分", "割増利用", "手動区分", "手動割増"]
+    keep_cols = key_cols + ["区分", "延長", "割増利用", "手動区分", "手動延長", "手動割増"]
     cur_small = cur[keep_cols].copy()
 
     merged = base.merge(cur_small, on=key_cols, how="left", suffixes=("", "_old"))
 
     merged["手動区分"] = merged["手動区分_old"].fillna(merged["手動区分"]).astype(bool)
+    merged["手動延長"] = merged["手動延長_old"].fillna(merged["手動延長"]).astype(bool)
     merged["手動割増"] = merged["手動割増_old"].fillna(merged["手動割増"]).astype(bool)
 
     merged.loc[merged["手動区分"], "区分"] = merged.loc[merged["手動区分"], "区分_old"].fillna(
         merged.loc[merged["手動区分"], "区分"]
+    )
+    merged.loc[merged["手動延長"], "延長"] = merged.loc[merged["手動延長"], "延長_old"].fillna(
+        merged.loc[merged["手動延長"], "延長"]
     )
     merged.loc[merged["手動割増"], "割増利用"] = merged.loc[merged["手動割増"], "割増利用_old"].fillna(
         merged.loc[merged["手動割増"], "割増利用"]
@@ -890,6 +897,7 @@ def merge_room_day(
 
     if not merged.empty:
         merged["区分"] = merged["区分"].apply(lambda x: _fix_room_slot(x, default_room_slot))
+        merged["延長"] = merged["延長"].apply(_fix_room_extension)
         merged["割増利用"] = merged["割増利用"].astype(bool)
     return merged
 
@@ -909,6 +917,11 @@ def apply_room_day_edits(full_df: pd.DataFrame, edited_subset: pd.DataFrame, def
     for c in ["日付", "部屋"]:
         sub[c] = sub[c].map(normalize_str)
 
+    if "延長" not in full.columns:
+        full["延長"] = "なし"
+    if "手動延長" not in full.columns:
+        full["手動延長"] = False
+
     full_idx = {(r["日付"], r["部屋"]): i for i, r in full.iterrows()}
 
     for _, r in sub.iterrows():
@@ -918,21 +931,27 @@ def apply_room_day_edits(full_df: pd.DataFrame, edited_subset: pd.DataFrame, def
         i = full_idx[key]
 
         new_slot = _fix_room_slot(r.get("区分", ""), default_room_slot)
+        new_ext = _fix_room_extension(r.get("延長", "なし"))
         new_bus = bool(r.get("割増利用", False))
 
         old_slot = normalize_str(full.loc[i, "区分"])
+        old_ext = _fix_room_extension(full.loc[i, "延長"])
         old_bus = bool(full.loc[i, "割増利用"])
 
         if new_slot != old_slot:
             full.loc[i, "手動区分"] = True
+        if new_ext != old_ext:
+            full.loc[i, "手動延長"] = True
         if new_bus != old_bus:
             full.loc[i, "手動割増"] = True
 
         full.loc[i, "区分"] = new_slot
+        full.loc[i, "延長"] = new_ext
         full.loc[i, "割増利用"] = new_bus
 
     full["割増利用"] = full["割増利用"].astype(bool)
     full["手動区分"] = full["手動区分"].astype(bool)
+    full["手動延長"] = full["手動延長"].astype(bool)
     full["手動割増"] = full["手動割増"].astype(bool)
     return full
 
@@ -944,6 +963,8 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
     if room_day_df is None or room_day_df.empty:
         return 0, pd.DataFrame(columns=["日付", "種別", "品目", "区分", "割増", "単価", "小計", "備考"])
 
+    slots_in_prices = set(prices_df["slot"].unique().tolist())
+
     rows = []
     total = 0
 
@@ -954,18 +975,23 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
         date_str = normalize_str(r.get("日付", ""))
         room = normalize_str(r.get("部屋", ""))
         slot = normalize_str(r.get("区分", ""))
+        ext = _fix_room_extension(r.get("延長", "なし"))
         is_business = bool(r.get("割増利用", False))
 
         dts = parse_date_str(date_str)
         if dts is None:
             continue
 
-        if slot == "利用なし":
-            rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": "利用なし", "割増": is_business, "単価": 0, "小計": 0, "備考": ""})
-            continue
-
         day_type = "土日祝" if is_weekend_or_holiday(dts) else "平日"
         price_type = "割増" if is_business else "通常"
+
+        # ---- 基本（部屋区分） ----
+        if slot == "利用なし":
+            note = ""
+            if ext != "なし":
+                note = "部屋が「利用なし」のため延長は無視されます"
+            rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": "利用なし", "割増": is_business, "単価": 0, "小計": 0, "備考": note})
+            continue
 
         m = (
             (prices_df["room"] == room)
@@ -987,11 +1013,51 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
                     "備考": "該当料金が prices.csv に見つかりません",
                 }
             )
-            continue
+        else:
+            amount = int(hit.iloc[0]["amount"])
+            total += amount
+            rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": slot, "割増": is_business, "単価": amount, "小計": amount, "備考": ""})
 
-        amount = int(hit.iloc[0]["amount"])
-        total += amount
-        rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": slot, "割増": is_business, "単価": amount, "小計": amount, "備考": ""})
+        # ---- 延長（追加料金） ----
+        if ext != "なし":
+            pricing_slot, mult, note = extension_to_pricing(ext, slots_in_prices)
+
+            m2 = (
+                (prices_df["room"] == room)
+                & (prices_df["day_type"] == day_type)
+                & (prices_df["price_type"] == price_type)
+                & (prices_df["slot"] == pricing_slot)
+            )
+            hit2 = prices_df[m2]
+            if hit2.empty:
+                rows.append(
+                    {
+                        "日付": dts.date(),
+                        "種別": "部屋",
+                        "品目": f"{room}（延長）",
+                        "区分": ext,
+                        "割増": is_business,
+                        "単価": None,
+                        "小計": None,
+                        "備考": f"延長の料金が prices.csv に見つかりません（参照slot={pricing_slot}）",
+                    }
+                )
+            else:
+                unit_amount = int(hit2.iloc[0]["amount"])
+                sub = unit_amount * mult
+                total += sub
+                rows.append(
+                    {
+                        "日付": dts.date(),
+                        "種別": "部屋",
+                        "品目": f"{room}（延長）",
+                        "区分": ext,
+                        "割増": is_business,
+                        "単価": unit_amount,
+                        "小計": sub,
+                        "備考": note,
+                    }
+                )
 
     df = pd.DataFrame(rows)
     return total, df
@@ -1057,16 +1123,11 @@ def calc_equipment_total_all_days(
         day_slot_default = day_slot_map.get(d, global_default_slot)
         rooms_today = used_rooms.get(d, set())
 
-        need_a = bool(rooms_today & MIC_A_ROOMS)
-        need_b = bool(rooms_today & MIC_B_ROOMS)
         need_c = bool(rooms_today & MIC_C_ROOMS)
         need_d = bool(MIC_D_ROOMS.issubset(rooms_today) and gallery_678)
-
         mic_allowed_today, _reason = infer_mic_allowed_for_rooms(rooms_today, gallery_678)
 
         requires_ctx = {
-            "need_pa_a": need_a,
-            "need_pa_b": need_b,
             "need_pa_c": need_c,
             "need_pa_d": need_d,
         }
@@ -1439,7 +1500,7 @@ def main():
         room_candidates = sorted(prices_df["room"].unique().tolist())
         rooms = st.multiselect("部屋（複数選択可）", room_candidates, default=[])
 
-        default_room_slot = st.selectbox("部屋の区分（新規追加の初期値）", TIME_SLOTS, index=TIME_SLOTS.index("全日"))
+        default_room_slot = st.selectbox("部屋の区分（新規追加の初期値）", ROOM_BASE_SLOTS, index=ROOM_BASE_SLOTS.index("全日"))
         is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
 
         st.divider()
@@ -1539,8 +1600,10 @@ def main():
                         "休館日": st.column_config.CheckboxColumn(disabled=True),
                         "部屋": st.column_config.TextColumn(disabled=True),
                         "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
+                        "延長": st.column_config.SelectboxColumn(options=ROOM_EXTENSION_SLOTS),
                         "割増利用": st.column_config.CheckboxColumn(),
                         "手動区分": st.column_config.CheckboxColumn(disabled=True),
+                        "手動延長": st.column_config.CheckboxColumn(disabled=True),
                         "手動割増": st.column_config.CheckboxColumn(disabled=True),
                     },
                 )
@@ -1690,16 +1753,6 @@ def main():
             def _has_any(qty: int) -> bool:
                 return int(qty or 0) > 0
 
-            if _has_any(sel_map.get(PA_A_ID, 0)):
-                eligible = [d for d, rs in rooms_by_day.items() if bool(rs & MIC_A_ROOMS)]
-                if not eligible:
-                    st.info("拡声装置A：対象日（大集会室）がないため計算されません。")
-
-            if _has_any(sel_map.get(PA_B_ID, 0)):
-                eligible = [d for d, rs in rooms_by_day.items() if bool(rs & MIC_B_ROOMS)]
-                if not eligible:
-                    st.info("拡声装置B：対象日（中集会室）がないため計算されません。")
-
             if _has_any(sel_map.get(PA_C_ID, 0)):
                 eligible = [d for d, rs in rooms_by_day.items() if bool(rs & MIC_C_ROOMS)]
                 if not eligible:
@@ -1717,7 +1770,7 @@ def main():
                     if ok:
                         eligible.append(d)
                 if not eligible:
-                    st.info("マイク：対象日がないため計算されません（大集会室/中集会室/大会議室/小集会室 または 第6〜8条件が必要です）。")
+                    st.info("マイク：対象日がないため計算されません（大会議室/小集会室 または 第6〜8条件が必要です）。")
 
         st.divider()
 
@@ -1742,7 +1795,7 @@ def main():
         do_calc = st.button("計算する", type="primary")
 
         if do_calc:
-            # 部屋
+            # 部屋（延長列も含めて加算）
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
 
             # 設備（active dates のみ）
