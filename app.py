@@ -46,21 +46,30 @@ TECH_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 # マイク/拡声装置：事故防止ルール（MVPはハードコードが無難）
 # =========================
 MIC_NEVER_ROOMS = {"第1会議室", "第2会議室", "第3会議室", "第4会議室", "第5会議室", "第9会議室", "特別室"}
-MIC_C_ROOMS = {"大会議室", "小集会室"}  # 拡声装置C（大会議室/小集会室）
+
+# 拡声装置の部屋対応（最新ルール）
+MIC_A_ROOMS = {"大集会室"}                 # 拡声装置A
+MIC_B_ROOMS = {"中集会室"}                 # 拡声装置B
+MIC_C_ROOMS = {"大会議室", "小集会室"}      # 拡声装置C（大会議室/小集会室）
 MIC_D_ROOMS = {"第6会議室", "第7会議室", "第8会議室"}  # 3室すべて＆ギャラリー利用で拡声装置D
 
 # CSVの item_id 想定（あなたのCSVに合わせる）
 MIC_WIRED_ID = "mic_wired"
 MIC_WIRELESS_ID = "mic_wireless"
+
+PA_A_ID = "pa_a"
+PA_B_ID = "pa_b"
 PA_C_ID = "pa_c"
 PA_D_ID = "pa_d"
 
 # 「拡声装置にマイク1本付属」を控除する対象
-PA_ITEMS_WITH_INCLUDED_MIC = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}  # A/Bが存在しても害なし
+PA_ITEMS_WITH_INCLUDED_MIC = {PA_A_ID, PA_B_ID, PA_C_ID, PA_D_ID}
+
 MIC_ITEMS = {MIC_WIRED_ID, MIC_WIRELESS_ID}
 
 # マイク関連として“日別判定”する item_id（安全側でPAも含める）
-MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_C_ID, PA_D_ID}
+MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_A_ID, PA_B_ID, PA_C_ID, PA_D_ID}
+
 
 # =========================
 # Utility
@@ -360,27 +369,39 @@ def slot_to_multiplier(slot: str) -> int:
     return mapping.get(slot, 1)
 
 
-def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optional[str]:
+def resolve_required_option(options: List[str], ctx: Dict[str, object], items: Dict[str, EquipmentItem]) -> Optional[str]:
     """
     OR候補から「どれを自動追加するか」を決める（事故防止・決め打ち）
     ※ 日別コンテキストで、必要なPAが明確な場合はそれを優先
+    ※ items に存在しないIDは選ばない（CSV未登録でも落ちないように）
     """
-    opts = set(options)
+    # まずCSVに存在する候補だけに絞る
+    opts = [o for o in options if o in items]
+    if not opts:
+        return None
 
-    # pa_c|pa_d の解決
-    if {PA_C_ID, PA_D_ID}.issubset(opts):
-        need_c = bool(ctx.get("need_pa_c", False))
-        need_d = bool(ctx.get("need_pa_d", False))
+    set_opts = set(opts)
 
-        if need_d and not need_c and PA_D_ID in opts:
-            return PA_D_ID
-        if need_c and not need_d and PA_C_ID in opts:
-            return PA_C_ID
+    # PA（拡声装置）候補が含まれている場合：日別needに合わせて選ぶ
+    need_map = {
+        PA_A_ID: "need_pa_a",
+        PA_B_ID: "need_pa_b",
+        PA_C_ID: "need_pa_c",
+        PA_D_ID: "need_pa_d",
+    }
 
-        # 判断不能 → 安全側で C（あれば）
-        return PA_C_ID if PA_C_ID in opts else (options[0] if options else None)
+    # 優先順（事故防止：D→A→B→C）
+    pa_priority = [PA_D_ID, PA_A_ID, PA_B_ID, PA_C_ID]
+    if any(pid in set_opts for pid in need_map.keys()):
+        for pid in pa_priority:
+            if pid in set_opts and bool(ctx.get(need_map[pid], False)):
+                return pid
 
-    return options[0] if options else None
+        # needが立ってない/判断不能 → CSVにある先頭
+        return opts[0]
+
+    # PA以外のORは先頭
+    return opts[0]
 
 
 def collect_required_items(
@@ -391,8 +412,9 @@ def collect_required_items(
     """
     依存品を自動追加
     - ORは resolve_required_option で 1つだけ選ぶ
+    - itemsに無いIDは追加しない（安全）
     """
-    selected_set = set(selected_item_ids)
+    selected_set = set([iid for iid in selected_item_ids if iid in items])
     added = True
     while added:
         added = False
@@ -404,8 +426,8 @@ def collect_required_items(
             for group in it.requires_groups:
                 if any(opt in selected_set for opt in group):
                     continue
-                choice = resolve_required_option(group, requires_context)
-                if choice and choice not in selected_set:
+                choice = resolve_required_option(group, requires_context, items)
+                if choice and choice in items and choice not in selected_set:
                     selected_set.add(choice)
                     added = True
     return list(selected_set)
@@ -444,18 +466,26 @@ def _safe_set(s: Set[str]) -> Set[str]:
 
 def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tuple[bool, str]:
     """
-    その日の「使用部屋構成」からマイク可否を判定
+    その日の「使用部屋構成」からマイク可否を判定（最新ルール）
     判定：
-      - (大会議室 or 小集会室) が含まれれば OK（拡声装置C）
-      - 第6-8全て + ギャラリー利用なら OK（拡声装置D）
+      - 大集会室 → OK（拡声装置A）
+      - 中集会室 → OK（拡声装置B）
+      - 大会議室 or 小集会室 → OK（拡声装置C）
+      - 第6-8全て + ギャラリー利用 → OK（拡声装置D）
       - 第6〜8が一部だけ、またはギャラリーOFFなら NG
-      - マイク不可の部屋だけなら NG
+      - マイク対象外の部屋だけなら NG
       - それ以外は NG
     """
     rooms_used = _safe_set(rooms_used)
 
     never = sorted(list(rooms_used & MIC_NEVER_ROOMS))
     never_note = f"（同日にマイク対象外の部屋が含まれています: {', '.join(never)}）" if never else ""
+
+    if rooms_used & MIC_A_ROOMS:
+        return True, f"拡声装置Aの対象（大集会室）{never_note}"
+
+    if rooms_used & MIC_B_ROOMS:
+        return True, f"拡声装置Bの対象（中集会室）{never_note}"
 
     if rooms_used & MIC_C_ROOMS:
         return True, f"拡声装置Cの対象（大会議室/小集会室）{never_note}"
@@ -466,22 +496,30 @@ def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tupl
     if rooms_used & MIC_D_ROOMS:
         return False, f"第6〜8会議室は「第6+第7+第8を全て」かつ「ギャラリー利用」の場合のみマイク対象{never_note}"
 
-    if rooms_used & MIC_NEVER_ROOMS:
+    if rooms_used and rooms_used.issubset(MIC_NEVER_ROOMS):
         return False, f"マイク対象外の部屋のみです{never_note}"
 
-    return False, "マイク対象部屋（大会議室/小集会室 または 第6〜8条件）が含まれていません"
+    return False, "マイク対象部屋（大集会室/中集会室/大会議室/小集会室 または 第6〜8条件）が含まれていません"
 
 
 def _is_mic_related_item_allowed_today(iid: str, ctx: Dict[str, object], mic_allowed_today: bool) -> bool:
     """
     マイク/拡声装置は「日別の部屋構成」で課金可否を決定する。
+    - PA_A: A条件を満たす日だけ
+    - PA_B: B条件を満たす日だけ
     - PA_C: C条件を満たす日だけ
     - PA_D: D条件を満たす日だけ（第6-8同日 + ギャラリー）
     - mic_wired/mic_wireless: その日がマイク対象なら課金
     """
+    need_a = bool(ctx.get("need_pa_a", False))
+    need_b = bool(ctx.get("need_pa_b", False))
     need_c = bool(ctx.get("need_pa_c", False))
     need_d = bool(ctx.get("need_pa_d", False))
 
+    if iid == PA_A_ID:
+        return need_a
+    if iid == PA_B_ID:
+        return need_b
     if iid == PA_C_ID:
         return need_c
     if iid == PA_D_ID:
@@ -1019,11 +1057,16 @@ def calc_equipment_total_all_days(
         day_slot_default = day_slot_map.get(d, global_default_slot)
         rooms_today = used_rooms.get(d, set())
 
+        need_a = bool(rooms_today & MIC_A_ROOMS)
+        need_b = bool(rooms_today & MIC_B_ROOMS)
         need_c = bool(rooms_today & MIC_C_ROOMS)
         need_d = bool(MIC_D_ROOMS.issubset(rooms_today) and gallery_678)
+
         mic_allowed_today, _reason = infer_mic_allowed_for_rooms(rooms_today, gallery_678)
 
         requires_ctx = {
+            "need_pa_a": need_a,
+            "need_pa_b": need_b,
             "need_pa_c": need_c,
             "need_pa_d": need_d,
         }
@@ -1647,6 +1690,16 @@ def main():
             def _has_any(qty: int) -> bool:
                 return int(qty or 0) > 0
 
+            if _has_any(sel_map.get(PA_A_ID, 0)):
+                eligible = [d for d, rs in rooms_by_day.items() if bool(rs & MIC_A_ROOMS)]
+                if not eligible:
+                    st.info("拡声装置A：対象日（大集会室）がないため計算されません。")
+
+            if _has_any(sel_map.get(PA_B_ID, 0)):
+                eligible = [d for d, rs in rooms_by_day.items() if bool(rs & MIC_B_ROOMS)]
+                if not eligible:
+                    st.info("拡声装置B：対象日（中集会室）がないため計算されません。")
+
             if _has_any(sel_map.get(PA_C_ID, 0)):
                 eligible = [d for d, rs in rooms_by_day.items() if bool(rs & MIC_C_ROOMS)]
                 if not eligible:
@@ -1664,7 +1717,7 @@ def main():
                     if ok:
                         eligible.append(d)
                 if not eligible:
-                    st.info("マイク：対象日がないため計算されません（大会議室/小集会室 または 第6〜8条件が必要です）。")
+                    st.info("マイク：対象日がないため計算されません（大集会室/中集会室/大会議室/小集会室 または 第6〜8条件が必要です）。")
 
         st.divider()
 
