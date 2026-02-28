@@ -79,8 +79,8 @@ hallbig_mc_table,hall_big_stage,司会台,台,500,0,,,1,0
 hallbig_flower_table,hall_big_stage,花台,台,500,0,,,1,0
 hallbig_long_table,hall_big_stage,長机,台,300,0,,W1800×D45×H70,1,0
 hallbig_chair,hall_big_stage,椅子,脚,100,0,,,1,0
-hallbig_gp_a_cf3,hall_big_stage,グランドピアノA（ヤマハCFIII-S）,台,8000,0,,（調律代別途）,1,0
-hallbig_gp_b_foster,hall_big_stage,グランドピアノB（オーガストフォスター）,台,6000,0,,（調律代別途）,1,0
+hallbig_gp_a_cf3,piano_big,グランドピアノA（ヤマハCFIII-S）,台,8000,0,,（調律代別途）,1,0
+hallbig_gp_b_foster,piano_big,グランドピアノB（オーガストフォスター）,台,6000,0,,（調律代別途）,1,0
 stageprops_big_hanging_full,stage_props_big,吊り看板（文字入）,枚,0,41900,,,1,0
 stageprops_big_hanging_base,stage_props_big,吊り看板（台のみ）,台,0,5500,,,1,0
 stageprops_big_standing_full,stage_props_big,立て看板（文字入）,枚,0,17280,,,1,0
