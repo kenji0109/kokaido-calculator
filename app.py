@@ -1271,7 +1271,6 @@ def calc_internet_total(
 
 # =========================
 # KPI Display（HTMLカード＋Sticky：金額が途切れない）
-# ★ ダークモードでも見えるように theme 変数対応
 # =========================
 def yen(x: int) -> str:
     try:
@@ -1284,15 +1283,12 @@ def inject_ui_css():
     st.markdown(
         """
 <style>
-/* Streamlit theme vars（無い環境でも崩れないよう fallback） */
 :root{
   --oai-bg: var(--background-color, #ffffff);
   --oai-card-bg: var(--secondary-background-color, rgba(255,255,255,0.98));
   --oai-text: var(--text-color, #111111);
   --oai-border: rgba(49, 51, 63, 0.2);
 }
-
-/* ===== Sticky total ===== */
 .oai-sticky {
   position: sticky;
   top: 0;
@@ -1321,7 +1317,7 @@ def inject_ui_css():
   font-weight: 800;
   line-height: 1.1;
   letter-spacing: 0.2px;
-  white-space: nowrap;           /* 途切れ防止 */
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 .oai-breakdown {
@@ -1333,8 +1329,6 @@ def inject_ui_css():
   text-overflow: ellipsis;
   max-width: 100%;
 }
-
-/* ===== KPI cards row ===== */
 .oai-kpi-row {
   display: grid;
   grid-template-columns: repeat(5, minmax(160px, 1fr));
@@ -1360,7 +1354,7 @@ def inject_ui_css():
   font-size: 26px;
   font-weight: 800;
   line-height: 1.15;
-  white-space: nowrap;           /* 改行させない */
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 .oai-kpi-sub {
@@ -1372,8 +1366,6 @@ def inject_ui_css():
   text-overflow: ellipsis;
 }
 .oai-kpi-card.total { border-width: 2px; }
-
-/* ===== Responsive ===== */
 @media (max-width: 1100px) {
   .oai-kpi-row { grid-template-columns: repeat(3, minmax(160px, 1fr)); }
 }
@@ -1451,15 +1443,12 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
 
-    # UI（Sticky/KPIカード）
     inject_ui_css()
 
-    # 前回計算結果があれば、上部にsticky表示（スマホ向け）
     if "last_totals" in st.session_state:
         tt = st.session_state["last_totals"]
         render_totals_sticky(tt["room"], tt["equip"], tt["tech"], tt["net"])
 
-    # データロード
     try:
         groups_df, items, group_meta = load_equipment_data()
     except Exception as e:
@@ -1480,9 +1469,6 @@ def main():
 
     left, right = st.columns([1, 1.35], gap="large")
 
-    # -------------------------
-    # LEFT: 期間 / 日別 / 部屋×日
-    # -------------------------
     with left:
         st.subheader("1) 期間・部屋（部屋×日テーブル編集）")
 
@@ -1498,9 +1484,18 @@ def main():
             st.stop()
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
-        rooms = st.multiselect("部屋（複数選択可）", room_candidates, default=[])
 
-        default_room_slot = st.selectbox("部屋の区分（新規追加の初期値）", ROOM_BASE_SLOTS, index=ROOM_BASE_SLOTS.index("全日"))
+        # ✅ 未選択＝全部屋（運用事故防止）
+        rooms_selected = st.multiselect("部屋（複数選択可 / 未選択＝全部屋）", room_candidates, default=[])
+        selected_rooms = rooms_selected if rooms_selected else room_candidates
+
+        # ✅ ここが今回の本題：初期値の選択肢に「利用なし」を追加
+        default_room_slot = st.selectbox(
+            "部屋の区分（新規追加の初期値）",
+            ROOM_SLOTS_WITH_NONE,
+            index=ROOM_SLOTS_WITH_NONE.index("全日") if "全日" in ROOM_SLOTS_WITH_NONE else 0,
+        )
+
         is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
 
         st.divider()
@@ -1553,7 +1548,6 @@ def main():
             edited_days = st.session_state[days_key]
             st.dataframe(edited_days, use_container_width=True)
 
-        # 休館日警告（赤＋具体日付）
         if not edited_days.empty and bool(edited_days["休館日"].any()):
             closed_list = edited_days.loc[edited_days["休館日"] == True, "日付"].astype(str).tolist()
             closed_list = [d for d in closed_list if d]
@@ -1568,11 +1562,10 @@ def main():
         room_day_key = f"room_day_{start_date}_{end_date}"
 
         if room_day_key not in st.session_state:
-            st.session_state[room_day_key] = build_room_day_base(edited_days, list(rooms), default_room_slot)
+            st.session_state[room_day_key] = build_room_day_base(edited_days, list(selected_rooms), default_room_slot)
         else:
-            st.session_state[room_day_key] = merge_room_day(st.session_state[room_day_key], edited_days, list(rooms), default_room_slot)
+            st.session_state[room_day_key] = merge_room_day(st.session_state[room_day_key], edited_days, list(selected_rooms), default_room_slot)
 
-        # フィルター
         st.markdown("### フィルター")
         f1, f2 = st.columns([1, 1])
         all_dates = sorted(st.session_state[room_day_key]["日付"].unique().tolist()) if not st.session_state[room_day_key].empty else []
@@ -1618,9 +1611,6 @@ def main():
             st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
             st.dataframe(view_df, use_container_width=True)
 
-    # -------------------------
-    # RIGHT: 設備 / 技術者 / ネット / 計算結果
-    # -------------------------
     with right:
         st.subheader("2) 設備・技術者・インターネット（入力）")
 
@@ -1630,7 +1620,6 @@ def main():
 
         rooms_by_day = rooms_used_by_date(room_day_df)
 
-        # 第6〜8を同時利用する日がある場合のみ、ギャラリー利用の入力を表示
         has_d_days_raw = any(bool(MIC_D_ROOMS.issubset(rs)) for rs in rooms_by_day.values())
         if has_d_days_raw:
             gallery_678 = st.checkbox(
@@ -1644,13 +1633,11 @@ def main():
 
         st.divider()
 
-        # -------------------------
-        # 設備 UI（グループごと）
-        # -------------------------
         st.markdown("### 設備（数量）")
         st.caption("各備品の「対象部屋」を確認の上、数量を入力してください。")
 
-        selected_rooms_now = sorted(list(set([normalize_str(x) for x in rooms])))
+        # ✅ 未選択＝全部屋を反映
+        selected_rooms_now = sorted(list(set([normalize_str(x) for x in selected_rooms])))
         selected_rooms_set = set(selected_rooms_now)
 
         def group_applies(meta: GroupMeta) -> bool:
@@ -1659,7 +1646,6 @@ def main():
                 return True
             return bool(set(targets) & selected_rooms_set) if selected_rooms_set else True
 
-        # グループ override（任意）
         group_overrides: Dict[str, str] = {}
         with st.expander("設備の区分（グループ単位の上書き：任意）", expanded=False):
             st.caption("未指定の場合、日別設定の「設備デフォ区分」が使用されます。")
@@ -1680,10 +1666,8 @@ def main():
 
         st.divider()
 
-        # 検索（任意）
         q = st.text_input("備品名で検索（任意）", value="", help="部分一致で絞り込みます。例：スクリーン、マイク、プロジェクター")
 
-        # 数量入力
         base_selections: List[Dict] = []
 
         items_by_group: Dict[str, List[EquipmentItem]] = {}
@@ -1710,7 +1694,6 @@ def main():
 
             group_items = sorted(items_by_group.get(gid, []), key=lambda x: x.item_name)
 
-            # 検索適用
             if q:
                 group_items = [it for it in group_items if q in it.item_name or q in it.notes or q in it.item_id]
 
@@ -1746,7 +1729,6 @@ def main():
                     if int(qty) > 0:
                         base_selections.append({"group_id": it.group_id, "item_id": it.item_id, "qty": int(qty), "auto_added": False})
 
-        # 参考情報：マイク/拡声装置の対象日が存在しない場合（info）
         if rooms_by_day:
             sel_map = {s["item_id"]: int(s.get("qty", 0) or 0) for s in base_selections}
 
@@ -1774,17 +1756,11 @@ def main():
 
         st.divider()
 
-        # -------------------------
-        # 技術者
-        # -------------------------
         st.markdown("### 舞台設備技術者")
         tech_people = st.number_input("人数", min_value=0, value=0, step=1, help="日別設定の「技術者区分」×人数で計算します。")
 
         st.divider()
 
-        # -------------------------
-        # インターネット
-        # -------------------------
         st.markdown("### インターネット")
         use_pocket_wifi = st.checkbox("ポケットWi-Fi（2,800円/日）", value=False)
         use_fixed_line = st.checkbox("常設回線（初日18,000円、2日目以降2,000円）", value=False)
@@ -1795,10 +1771,8 @@ def main():
         do_calc = st.button("計算する", type="primary")
 
         if do_calc:
-            # 部屋（延長列も含めて加算）
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
 
-            # 設備（active dates のみ）
             equipment_total, equipment_df = calc_equipment_total_all_days(
                 days_df=edited_days,
                 room_day_df=room_day_df,
@@ -1810,10 +1784,8 @@ def main():
                 gallery_678=gallery_678,
             )
 
-            # 技術者（active dates のみ）
             tech_total, tech_df = calc_stage_tech_total_all_days(edited_days, room_day_df, int(tech_people))
 
-            # インターネット（active dates のみ）
             internet_total, internet_df = calc_internet_total(
                 room_day_df=room_day_df,
                 use_pocket_wifi=use_pocket_wifi,
@@ -1823,7 +1795,6 @@ def main():
 
             st.subheader("結果")
 
-            # sticky用に保存（次回リロードでも上部に残る）
             st.session_state["last_totals"] = {
                 "room": room_total,
                 "equip": equipment_total,
@@ -1831,10 +1802,7 @@ def main():
                 "net": internet_total,
             }
 
-            # その場でも上に大きく表示（sticky）
             render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
-
-            # KPIをHTMLカードで表示（途切れ/改行しない）
             render_kpis_cards(room_total, equipment_total, tech_total, internet_total)
 
             tab_all, tab_rooms, tab_eq, tab_tech, tab_net = st.tabs(["明細（全部）", "部屋", "設備", "技術者", "インターネット"])
