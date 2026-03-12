@@ -33,40 +33,37 @@ DATE_FMT = "%Y/%m/%d"
 # =========================
 # Time slots
 # =========================
-# ※ TIME_SLOTS は設備/技術者にも使う（延長30分を含めてOK）
 TIME_SLOTS = ["午前", "午後", "夜間", "午前-午後", "午後-夜間", "全日", "延長30分"]
 
-# 部屋の「基本区分」（延長は別列で扱うので除外）
 ROOM_BASE_SLOTS = ["午前", "午後", "夜間", "午前-午後", "午後-夜間", "全日"]
 ROOM_SLOTS_WITH_NONE = ["利用なし"] + ROOM_BASE_SLOTS
 
-# 部屋の「延長」欄（追加料金として別計算）
 ROOM_EXTENSION_SLOTS = ["なし", "前延長30分", "後延長30分", "前後延長30分"]
 
-# 設備は「利用なし」を許可（=倍率0で課金停止）
 EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 
-# 技術者も「利用なし」を許可（=課金停止）
 TECH_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 
 # =========================
-# マイク/拡声装置：事故防止ルール（MVPはハードコードが無難）
+# マイク/拡声装置：事故防止ルール
 # =========================
 MIC_NEVER_ROOMS = {"第1会議室", "第2会議室", "第3会議室", "第4会議室", "第5会議室", "第9会議室", "特別室"}
-MIC_C_ROOMS = {"大会議室", "小集会室"}  # 拡声装置C（大会議室/小集会室）
-MIC_D_ROOMS = {"第6会議室", "第7会議室", "第8会議室"}  # 3室すべて＆ギャラリー利用で拡声装置D
+MIC_C_ROOMS = {"大会議室", "小集会室"}
+MIC_D_ROOMS = {"第6会議室", "第7会議室", "第8会議室"}
 
-# CSVの item_id 想定（あなたのCSVに合わせる）
 MIC_WIRED_ID = "mic_wired"
 MIC_WIRELESS_ID = "mic_wireless"
+MIC_STAND_ID = "mic_stand"  # ★追加
 PA_C_ID = "pa_c"
 PA_D_ID = "pa_d"
 
-# 「拡声装置にマイク1本付属」を控除する対象
-PA_ITEMS_WITH_INCLUDED_MIC = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}  # A/Bが存在しても害なし
-MIC_ITEMS = {MIC_WIRED_ID, MIC_WIRELESS_ID}
+# 「拡声装置にマイク1本・スタンド1本付属」を控除する対象
+PA_ITEMS_WITH_INCLUDED_MIC = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}
+PA_ITEMS_WITH_INCLUDED_STAND = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}  # ★追加
 
-# マイク関連として“日別判定”する item_id（安全側でPAも含める）
+MIC_ITEMS = {MIC_WIRED_ID, MIC_WIRELESS_ID}
+STAND_ITEMS = {MIC_STAND_ID}  # ★追加
+
 MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_C_ID, PA_D_ID}
 
 # =========================
@@ -109,7 +106,7 @@ def parse_date_str(s: str) -> Optional[pd.Timestamp]:
 
 
 # =========================
-# applies_to_rooms パーサ（強化版）
+# applies_to_rooms パーサ
 # =========================
 _RANGE_PAT = re.compile(r"第\s*(\d+)\s*[〜～\-－—]\s*(?:第\s*)?(\d+)\s*会議室")
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
@@ -119,7 +116,6 @@ def _normalize_digits(s: str) -> str:
     return s.translate(_FULLWIDTH_DIGITS)
 
 
-# 部屋名抽出（備考/品目名から推定用）
 _ROOM_NAME_PAT = re.compile(r"(大会議室|大集会室|中集会室|小集会室|特別室|控え室\s*1|控え室\s*2|控室\s*1|控室\s*2|第\s*\d+\s*会議室)")
 
 
@@ -136,13 +132,6 @@ def _expand_room_range(token: str) -> List[str]:
 
 
 def parse_rooms_cell(cell: str) -> List[str]:
-    """
-    applies_to_rooms 用：
-    - 空/「*」/all → ["*"]
-    - 句読点/中点/スラッシュ/空白/全角空白 → 区切り扱い
-    - カッコは除去（中身は残す）
-    - 第6〜8会議室 のレンジ展開
-    """
     s = normalize_str(cell)
     s = _normalize_digits(s)
     if s == "" or s == "*" or s.lower() == "all":
@@ -162,14 +151,9 @@ def parse_rooms_cell(cell: str) -> List[str]:
 
 
 def infer_item_target_rooms(item_name: str, notes: str, fallback: str) -> str:
-    """
-    品目名/備考から対象部屋を推定して表示に使う。
-    推定できない場合は fallback（通常はグループの applies_to_rooms）を返す。
-    """
     text = _normalize_digits(f"{item_name} {notes}")
     targets: Set[str] = set()
 
-    # レンジ（第6〜8会議室など）
     for m in _RANGE_PAT.finditer(text):
         a = int(m.group(1))
         b = int(m.group(2))
@@ -177,7 +161,6 @@ def infer_item_target_rooms(item_name: str, notes: str, fallback: str) -> str:
         for i in range(lo, hi + 1):
             targets.add(f"第{i}会議室")
 
-    # 単体の部屋名
     for m in _ROOM_NAME_PAT.finditer(text):
         token = m.group(0)
         token = re.sub(r"\s+", "", token)
@@ -189,11 +172,6 @@ def infer_item_target_rooms(item_name: str, notes: str, fallback: str) -> str:
 
 
 def parse_requires_groups(cell: str) -> List[List[str]]:
-    """
-    requires_item_ids 用：
-    - "," は AND（複数必須）
-    - "|" は OR（いずれか1つ）
-    """
     s = normalize_str(cell)
     if s == "" or s == "*" or s.lower() == "all":
         return []
@@ -260,7 +238,7 @@ class EquipmentItem:
     unit: str
     price_per_slot: int
     price_once_yen: int
-    requires_groups: List[List[str]]  # AND/OR混在
+    requires_groups: List[List[str]]
     notes: str
     is_countable: int
     is_power_item: int
@@ -271,8 +249,8 @@ class GroupMeta:
     group_id: str
     group_name: str
     applies_to_rooms: str
-    default_inherit_room_slot: int  # 1:日別の設備デフォ区分を継承 / 0:継承しない
-    allowed_slot_override: int      # 1:グループごとの区分overrideを許可 / 0:許可しない
+    default_inherit_room_slot: int
+    allowed_slot_override: int
 
 
 def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[str, GroupMeta]]:
@@ -290,13 +268,11 @@ def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[
         missing = required_master_cols - set(master_df.columns)
         raise ValueError(f"equipment_master.csv に必要な列が足りません: {missing}")
 
-    # groups optional columns
     if "default_inherit_room_slot" not in groups_df.columns:
         groups_df["default_inherit_room_slot"] = 1
     if "allowed_slot_override" not in groups_df.columns:
         groups_df["allowed_slot_override"] = 1
 
-    # master optional columns
     if "price_once_yen" not in master_df.columns:
         master_df["price_once_yen"] = 0
     if "requires_item_ids" not in master_df.columns:
@@ -368,13 +344,8 @@ def slot_to_multiplier(slot: str) -> int:
 
 
 def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optional[str]:
-    """
-    OR候補から「どれを自動追加するか」を決める（事故防止・決め打ち）
-    ※ 日別コンテキストで、必要なPAが明確な場合はそれを優先
-    """
     opts = set(options)
 
-    # pa_c|pa_d の解決
     if {PA_C_ID, PA_D_ID}.issubset(opts):
         need_c = bool(ctx.get("need_pa_c", False))
         need_d = bool(ctx.get("need_pa_d", False))
@@ -384,7 +355,6 @@ def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optio
         if need_c and not need_d and PA_C_ID in opts:
             return PA_C_ID
 
-        # 判断不能 → 安全側で C（あれば）
         return PA_C_ID if PA_C_ID in opts else (options[0] if options else None)
 
     return options[0] if options else None
@@ -395,10 +365,6 @@ def collect_required_items(
     items: Dict[str, EquipmentItem],
     requires_context: Dict[str, object],
 ) -> List[str]:
-    """
-    依存品を自動追加
-    - ORは resolve_required_option で 1つだけ選ぶ
-    """
     selected_set = set(selected_item_ids)
     added = True
     while added:
@@ -459,15 +425,6 @@ def _safe_set(s: Set[str]) -> Set[str]:
 
 
 def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tuple[bool, str]:
-    """
-    その日の「使用部屋構成」からマイク可否を判定
-    判定：
-      - (大会議室 or 小集会室) が含まれれば OK（拡声装置C）
-      - 第6-8全て + ギャラリー利用なら OK（拡声装置D）
-      - 第6〜8が一部だけ、またはギャラリーOFFなら NG
-      - マイク不可の部屋だけなら NG
-      - それ以外は NG
-    """
     rooms_used = _safe_set(rooms_used)
 
     never = sorted(list(rooms_used & MIC_NEVER_ROOMS))
@@ -489,12 +446,6 @@ def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tupl
 
 
 def _is_mic_related_item_allowed_today(iid: str, ctx: Dict[str, object], mic_allowed_today: bool) -> bool:
-    """
-    マイク/拡声装置は「日別の部屋構成」で課金可否を決定する。
-    - PA_C: C条件を満たす日だけ
-    - PA_D: D条件を満たす日だけ（第6-8同日 + ギャラリー）
-    - mic_wired/mic_wireless: その日がマイク対象なら課金
-    """
     need_c = bool(ctx.get("need_pa_c", False))
     need_d = bool(ctx.get("need_pa_d", False))
 
@@ -517,13 +468,6 @@ def calc_equipment_total_for_day(
     requires_context: Dict[str, object],
     mic_allowed_today: bool,
 ) -> Tuple[int, pd.DataFrame]:
-    """
-    - 区分課金: price_per_slot > 0（倍率あり）
-    - 区分なし単価: price_per_slot == 0 and price_once_yen > 0（倍率なし）
-    - 依存品 ORは1つだけ自動追加
-    - 拡声装置の付属マイク1本を控除（二重請求防止）
-    - マイク/拡声装置は「日別の部屋構成」で課金可否を決定（対象外日は課金0、明細は残す）
-    """
     cols = ["種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"]
     if not selections:
         return 0, pd.DataFrame(columns=cols)
@@ -548,11 +492,11 @@ def calc_equipment_total_for_day(
             continue
         qty_map[iid] = qty_map.get(iid, 0) + max(0, q)
 
+    # マイク控除
     included_mics = sum(qty_map.get(pid, 0) for pid in PA_ITEMS_WITH_INCLUDED_MIC)
     req_wired = qty_map.get(MIC_WIRED_ID, 0)
     req_wireless = qty_map.get(MIC_WIRELESS_ID, 0)
 
-    # 控除順：有線→ワイヤレス
     remain = included_mics
     used_w = min(remain, req_wired)
     bill_wired = req_wired - used_w
@@ -564,6 +508,14 @@ def calc_equipment_total_for_day(
 
     billed_qty_override = {MIC_WIRED_ID: bill_wired, MIC_WIRELESS_ID: bill_wireless}
     deducted_note = {MIC_WIRED_ID: used_w, MIC_WIRELESS_ID: used_ww}
+
+    # ★ スタンド控除（マイクと同じロジック）
+    included_stands = sum(qty_map.get(pid, 0) for pid in PA_ITEMS_WITH_INCLUDED_STAND)
+    req_stand = qty_map.get(MIC_STAND_ID, 0)
+    used_stand = min(included_stands, req_stand)
+    bill_stand = req_stand - used_stand
+    billed_qty_override[MIC_STAND_ID] = bill_stand
+    deducted_note[MIC_STAND_ID] = used_stand
 
     rows = []
     total = 0
@@ -588,14 +540,13 @@ def calc_equipment_total_for_day(
             if not allowed_today:
                 forced_zero = True
 
-        # 課金数量（付属マイク控除）
+        # 課金数量（付属マイク・スタンド控除）
         if forced_zero:
             billed_qty = 0
+        elif iid in MIC_ITEMS or iid in STAND_ITEMS:  # ★ STAND_ITEMSも対象
+            billed_qty = int(billed_qty_override.get(iid, orig_qty))
         else:
-            if iid in MIC_ITEMS:
-                billed_qty = int(billed_qty_override.get(iid, orig_qty))
-            else:
-                billed_qty = orig_qty
+            billed_qty = orig_qty
 
         inherit = bool(meta.default_inherit_room_slot)
         base_slot = day_slot_default if inherit else global_fallback_slot
@@ -634,7 +585,7 @@ def calc_equipment_total_for_day(
 
         note = it.notes or ""
         if iid in PA_ITEMS_WITH_INCLUDED_MIC:
-            note = (note + " / " if note else "") + "マイク1本付属"
+            note = (note + " / " if note else "") + "マイク1本・スタンド1本付属"  # ★ 表示更新
 
         if iid in MIC_ITEMS:
             ded = int(deducted_note.get(iid, 0))
@@ -642,11 +593,17 @@ def calc_equipment_total_for_day(
                 note = (note + " / " if note else "") + f"付属マイク控除:{ded}（有線→ワイヤレス）"
             note = (note + " / " if note else "") + f"選択:{orig_qty}→課金:{billed_qty}"
 
+        # ★ スタンドの控除メモ
+        if iid == MIC_STAND_ID:
+            ded = int(deducted_note.get(iid, 0))
+            if ded > 0:
+                note = (note + " / " if note else "") + f"付属スタンド控除:{ded}"
+            note = (note + " / " if note else "") + f"選択:{orig_qty}→課金:{billed_qty}"
+
         if iid in MIC_RELATED_ITEM_IDS and forced_zero:
             note = (note + " / " if note else "") + "対象外日（当日は計算対象外）"
 
-        # billed_qty=0でも、マイク関連は“選んでいた事実”を残す
-        if billed_qty == 0 and orig_qty > 0 and (iid in MIC_RELATED_ITEM_IDS):
+        if billed_qty == 0 and orig_qty > 0 and (iid in MIC_RELATED_ITEM_IDS or iid in STAND_ITEMS):
             pass
         elif billed_qty == 0:
             continue
@@ -718,12 +675,6 @@ def load_prices_df() -> pd.DataFrame:
 
 
 def extension_to_pricing(ext: str, slots_in_prices: Set[str]) -> Tuple[str, int, str]:
-    """
-    延長列の値 → prices.csv の slot へ変換
-    - prices.csv に「前延長30分」等が存在するならそのまま参照（将来拡張）
-    - 無いなら「延長30分」に寄せる
-    - 前後延長30分は「延長30分×2」
-    """
     if ext in slots_in_prices:
         return ext, 1, ""
 
@@ -736,19 +687,19 @@ def extension_to_pricing(ext: str, slots_in_prices: Set[str]) -> Tuple[str, int,
 
 
 # =========================
-# Internet（MVP値：あとでCSV化OK）
+# Internet
 # =========================
 INTERNET_POCKET_WIFI_PER_DAY = 2800
 INTERNET_FIXED_FIRST_DAY = 18000
 INTERNET_FIXED_AFTER_DAY = 2000
-INTERNET_TEMP_LINE_BASE = 5000  # + 別途見積（仮）
+INTERNET_TEMP_LINE_BASE = 5000
 
-FLOOR_1_ROOMS = {"大集会室"}               # 1F扱い
-FLOOR_3_ROOMS = {"中集会室", "小集会室"}   # 3F扱い（同フロア課金）
+FLOOR_1_ROOMS = {"大集会室"}
+FLOOR_3_ROOMS = {"中集会室", "小集会室"}
 
 
 # =========================
-# Day settings（表示用）
+# Day settings
 # =========================
 def make_days_base(days: List[pd.Timestamp], closed_days: set, default_room_slot: str, is_business_default: bool) -> pd.DataFrame:
     rows = []
@@ -771,9 +722,6 @@ def make_days_base(days: List[pd.Timestamp], closed_days: set, default_room_slot
 
 
 def sync_days_df_defaults(df: pd.DataFrame, old_defaults: Dict[str, object], new_defaults: Dict[str, object]) -> pd.DataFrame:
-    """
-    旧デフォルトと同じ値のセルだけを新デフォルトへ置換（手編集を潰しにくい）
-    """
     df = df.copy()
 
     for i in range(len(df)):
@@ -800,7 +748,7 @@ def sync_days_df_defaults(df: pd.DataFrame, old_defaults: Dict[str, object], new
 
 
 # =========================
-# Room-Day table（計算の唯一入力）
+# Room-Day table
 # =========================
 def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
     m = {}
@@ -848,10 +796,6 @@ def merge_room_day(
     selected_rooms: List[str],
     default_room_slot: str,
 ) -> pd.DataFrame:
-    """
-    - 手動フラグFalseのセルは、日別デフォルトで上書き（=一括割増が効く）
-    - 手動フラグTrueのセルは、ユーザー指定を保持
-    """
     base = build_room_day_base(days_df, selected_rooms, default_room_slot)
     if current is None or current.empty:
         return base
@@ -861,7 +805,6 @@ def merge_room_day(
         if c in cur.columns:
             cur[c] = cur[c].map(normalize_str)
 
-    # 旧互換
     if "手動区分" not in cur.columns:
         cur["手動区分"] = True
     if "手動割増" not in cur.columns:
@@ -903,9 +846,6 @@ def merge_room_day(
 
 
 def apply_room_day_edits(full_df: pd.DataFrame, edited_subset: pd.DataFrame, default_room_slot: str) -> pd.DataFrame:
-    """
-    data_editorで編集された subset を full に反映し、変更があったセルは手動フラグを立てる
-    """
     if full_df is None or full_df.empty or edited_subset is None or edited_subset.empty:
         return full_df
 
@@ -985,7 +925,6 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
         day_type = "土日祝" if is_weekend_or_holiday(dts) else "平日"
         price_type = "割増" if is_business else "通常"
 
-        # ---- 基本（部屋区分） ----
         if slot == "利用なし":
             note = ""
             if ext != "なし":
@@ -1018,7 +957,6 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
             total += amount
             rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": slot, "割増": is_business, "単価": amount, "小計": amount, "備考": ""})
 
-        # ---- 延長（追加料金） ----
         if ext != "なし":
             pricing_slot, mult, note = extension_to_pricing(ext, slots_in_prices)
 
@@ -1067,9 +1005,6 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
 # 計算用：日ごとの使用部屋を集計
 # =========================
 def rooms_used_by_date(room_day_df: pd.DataFrame) -> Dict[str, Set[str]]:
-    """
-    date_str -> set(rooms) （利用なし除外、休館日除外）
-    """
     m: Dict[str, Set[str]] = {}
     if room_day_df is None or room_day_df.empty:
         return m
@@ -1105,10 +1040,6 @@ def calc_equipment_total_all_days(
     group_meta: Dict[str, GroupMeta],
     gallery_678: bool,
 ) -> Tuple[int, pd.DataFrame]:
-    """
-    運用安全のため「実際に部屋が使われる日(active_dates)」だけ設備を課金
-    ※ マイク/拡声装置は selections 内に含め、日別判定で対象日のみ課金
-    """
     active_dates = active_dates_from_room_day(room_day_df)
     if not active_dates:
         return 0, pd.DataFrame(columns=["日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"])
@@ -1224,11 +1155,6 @@ def calc_internet_total(
     use_fixed_line: bool,
     use_temp_line: bool,
 ) -> Tuple[int, pd.DataFrame]:
-    """
-    - ポケットWi-Fi：利用日（=active_dates）ごと
-    - 常設回線：フロアごとの「連続ブロック」単位で初日/2日目以降
-    - 仮設回線：フロアごとの「連続ブロック開始日」に 5,000円/回（+別途見積）
-    """
     active_dates = [parse_date_str(d) for d in active_dates_from_room_day(room_day_df)]
     active_dates = [d for d in active_dates if d is not None]
     if not active_dates:
@@ -1270,7 +1196,7 @@ def calc_internet_total(
 
 
 # =========================
-# KPI Display（HTMLカード＋Sticky：金額が途切れない）
+# KPI Display
 # =========================
 def yen(x: int) -> str:
     try:
@@ -1485,11 +1411,9 @@ def main():
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
 
-        # ✅ 未選択＝全部屋（運用事故防止）
         rooms_selected = st.multiselect("部屋（複数選択可 / 未選択＝全部屋）", room_candidates, default=[])
         selected_rooms = rooms_selected if rooms_selected else room_candidates
 
-        # ✅ ここが今回の本題：初期値の選択肢に「利用なし」を追加
         default_room_slot = st.selectbox(
             "部屋の区分（新規追加の初期値）",
             ROOM_SLOTS_WITH_NONE,
@@ -1636,7 +1560,6 @@ def main():
         st.markdown("### 設備（数量）")
         st.caption("各備品の「対象部屋」を確認の上、数量を入力してください。")
 
-        # ✅ 未選択＝全部屋を反映
         selected_rooms_now = sorted(list(set([normalize_str(x) for x in selected_rooms])))
         selected_rooms_set = set(selected_rooms_now)
 
