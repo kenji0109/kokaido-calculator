@@ -2,3 +2,4 @@ streamlit
 pandas
 jpholiday
 streamlit-japanese-date-input
+reportlab
