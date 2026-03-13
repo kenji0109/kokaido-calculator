@@ -7,7 +7,6 @@ from typing import Dict, List, Tuple, Optional, Set
 import re
 import pandas as pd
 import streamlit as st
-from streamlit_japanese_date_input import japanese_date_input  # ★追加
 
 # 祝日判定（入ってなければ週末のみ判定）
 try:
@@ -1400,15 +1399,14 @@ def main():
         st.subheader("1) 期間・部屋（部屋×日テーブル編集）")
 
         col_a, col_b = st.columns(2)
-        # ★ 修正: st.date_input → japanese_date_input（日本語カレンダー対応）
         with col_a:
-            start_date = japanese_date_input(
+            start_date = st.date_input(
                 "開始日",
                 value=pd.Timestamp.today().date(),
                 key="start_date",
             )
         with col_b:
-            end_date = japanese_date_input(
+            end_date = st.date_input(
                 "終了日",
                 value=pd.Timestamp.today().date(),
                 key="end_date",
