@@ -492,19 +492,19 @@ def calc_equipment_total_for_day(
             continue
         qty_map[iid] = qty_map.get(iid, 0) + max(0, q)
 
-    # マイク控除
+    # マイク控除（★ワイヤレス優先に修正）
     included_mics = sum(qty_map.get(pid, 0) for pid in PA_ITEMS_WITH_INCLUDED_MIC)
     req_wired = qty_map.get(MIC_WIRED_ID, 0)
     req_wireless = qty_map.get(MIC_WIRELESS_ID, 0)
 
     remain = included_mics
-    used_w = min(remain, req_wired)
-    bill_wired = req_wired - used_w
-    remain -= used_w
-
     used_ww = min(remain, req_wireless)
     bill_wireless = req_wireless - used_ww
     remain -= used_ww
+
+    used_w = min(remain, req_wired)
+    bill_wired = req_wired - used_w
+    remain -= used_w
 
     billed_qty_override = {MIC_WIRED_ID: bill_wired, MIC_WIRELESS_ID: bill_wireless}
     deducted_note = {MIC_WIRED_ID: used_w, MIC_WIRELESS_ID: used_ww}
@@ -543,7 +543,7 @@ def calc_equipment_total_for_day(
         # 課金数量（付属マイク・スタンド控除）
         if forced_zero:
             billed_qty = 0
-        elif iid in MIC_ITEMS or iid in STAND_ITEMS:  # ★ STAND_ITEMSも対象
+        elif iid in MIC_ITEMS or iid in STAND_ITEMS:
             billed_qty = int(billed_qty_override.get(iid, orig_qty))
         else:
             billed_qty = orig_qty
@@ -585,12 +585,12 @@ def calc_equipment_total_for_day(
 
         note = it.notes or ""
         if iid in PA_ITEMS_WITH_INCLUDED_MIC:
-            note = (note + " / " if note else "") + "マイク1本・スタンド1本付属"  # ★ 表示更新
+            note = (note + " / " if note else "") + "マイク1本・スタンド1本付属"
 
         if iid in MIC_ITEMS:
             ded = int(deducted_note.get(iid, 0))
             if ded > 0:
-                note = (note + " / " if note else "") + f"付属マイク控除:{ded}（有線→ワイヤレス）"
+                note = (note + " / " if note else "") + f"付属マイク控除:{ded}（ワイヤレス→有線）"
             note = (note + " / " if note else "") + f"選択:{orig_qty}→課金:{billed_qty}"
 
         # ★ スタンドの控除メモ
@@ -1412,7 +1412,7 @@ def main():
                 key="end_date",
             )
 
-        # ★ 追加: Noneガード（初回レンダリング時に未選択の場合の対策）
+        # 初回レンダリング時に未選択の場合の対策
         if start_date is None:
             start_date = pd.Timestamp.today().date()
         if end_date is None:
