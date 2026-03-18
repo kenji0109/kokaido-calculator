@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
-
+import hashlib
+import json
 import re
+
 import pandas as pd
 import streamlit as st
 
@@ -158,6 +160,79 @@ def parse_date_str(s: str) -> Optional[pd.Timestamp]:
     if pd.isna(ts):
         return None
     return pd.Timestamp(ts)
+
+
+def _clear_calc_cache():
+    st.session_state["calc_done"] = False
+    st.session_state.pop("last_totals", None)
+    st.session_state.pop("last_input_signature", None)
+
+
+def _df_records_for_signature(df: pd.DataFrame) -> List[Dict[str, str]]:
+    if df is None or df.empty:
+        return []
+
+    tmp = df.copy()
+
+    for c in tmp.columns:
+        if pd.api.types.is_bool_dtype(tmp[c]):
+            tmp[c] = tmp[c].fillna(False).astype(bool).astype(int).astype(str)
+        else:
+            tmp[c] = tmp[c].map(lambda v: "" if pd.isna(v) else str(v))
+
+    sort_cols = [c for c in ["日付", "部屋", "グループ", "品目", "カテゴリ", "名称"] if c in tmp.columns]
+    if sort_cols:
+        tmp = tmp.sort_values(sort_cols).reset_index(drop=True)
+
+    return tmp.to_dict(orient="records")
+
+
+def _make_input_signature(
+    start_date,
+    end_date,
+    selected_rooms: List[str],
+    default_room_slot: str,
+    is_business_default: bool,
+    edited_days: pd.DataFrame,
+    room_day_df: pd.DataFrame,
+    group_overrides: Dict[str, str],
+    base_selections: List[Dict],
+    gallery_678: bool,
+    tech_people: int,
+    use_pocket_wifi: bool,
+    use_fixed_line: bool,
+    use_temp_line: bool,
+) -> str:
+    payload = {
+        "start_date": str(start_date),
+        "end_date": str(end_date),
+        "selected_rooms": sorted([normalize_str(x) for x in selected_rooms]),
+        "default_room_slot": normalize_str(default_room_slot),
+        "is_business_default": bool(is_business_default),
+        "edited_days": _df_records_for_signature(edited_days),
+        "room_day_df": _df_records_for_signature(room_day_df),
+        "group_overrides": dict(sorted(group_overrides.items())),
+        "base_selections": sorted(
+            [
+                {
+                    "group_id": normalize_str(x.get("group_id", "")),
+                    "item_id": normalize_str(x.get("item_id", "")),
+                    "qty": int(x.get("qty", 0) or 0),
+                    "auto_added": bool(x.get("auto_added", False)),
+                }
+                for x in base_selections
+            ],
+            key=lambda x: (x["group_id"], x["item_id"]),
+        ),
+        "gallery_678": bool(gallery_678),
+        "tech_people": int(tech_people),
+        "use_pocket_wifi": bool(use_pocket_wifi),
+        "use_fixed_line": bool(use_fixed_line),
+        "use_temp_line": bool(use_temp_line),
+    }
+
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 # =========================
@@ -560,7 +635,6 @@ def calc_equipment_total_for_day(
             if key not in existing:
                 selections.append({"group_id": it.group_id, "item_id": it.item_id, "qty": 1, "auto_added": True})
 
-    # ---- 数量マップ作成 ----
     qty_map: Dict[str, int] = {}
     for s in selections:
         iid = s.get("item_id")
@@ -569,7 +643,6 @@ def calc_equipment_total_for_day(
             continue
         qty_map[iid] = qty_map.get(iid, 0) + max(0, q)
 
-    # ---- 課金数量初期値 ----
     billed_qty_override: Dict[str, int] = {}
     for iid, q in qty_map.items():
         billed_qty_override[iid] = int(q)
@@ -578,12 +651,10 @@ def calc_equipment_total_for_day(
     for iid in qty_map.keys():
         deducted_note[iid] = 0
 
-    # 既知の対象IDも初期化
     for iid in ALL_MIC_ITEMS | STAND_ITEMS:
         billed_qty_override.setdefault(iid, 0)
         deducted_note.setdefault(iid, 0)
 
-    # ---- PAごとの無料マイク・無料スタンド控除 ----
     for pa_id, rule in PA_FREE_RULES.items():
         pa_count = int(qty_map.get(pa_id, 0))
         if pa_count <= 0:
@@ -620,14 +691,12 @@ def calc_equipment_total_for_day(
         if orig_qty <= 0:
             continue
 
-        # 日別可否（C/D系のみ）
         forced_zero = False
         if iid in MIC_RELATED_ITEM_IDS:
             allowed_today = _is_mic_related_item_allowed_today(iid, requires_context, mic_allowed_today)
             if not allowed_today:
                 forced_zero = True
 
-        # 課金数量
         if forced_zero:
             billed_qty = 0
         elif iid in ALL_MIC_ITEMS or iid in STAND_ITEMS:
@@ -689,7 +758,6 @@ def calc_equipment_total_for_day(
         if iid in MIC_RELATED_ITEM_IDS and forced_zero:
             note = (note + " / " if note else "") + "対象外日（当日は計算対象外）"
 
-        # billed_qty=0でも、選択していた事実は残す（マイク/スタンド/PAのみ）
         if billed_qty == 0 and orig_qty > 0 and (iid in MIC_RELATED_ITEM_IDS or iid in ALL_MIC_ITEMS or iid in STAND_ITEMS):
             pass
         elif billed_qty == 0:
@@ -1453,7 +1521,6 @@ def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, in
 # 休館日情報を収集するヘルパー
 # =========================
 def _collect_closed_day_dates(days_df: pd.DataFrame) -> List[str]:
-    """日別設定から休館日の日付文字列リストを返す"""
     if days_df is None or days_df.empty:
         return []
     mask = days_df["休館日"] == True
@@ -1468,11 +1535,6 @@ def main():
     st.title(APP_TITLE)
 
     inject_ui_css()
-
-    # --- 修正①: 計算済みフラグがある場合のみ sticky を表示 ---
-    if st.session_state.get("calc_done", False) and "last_totals" in st.session_state:
-        tt = st.session_state["last_totals"]
-        render_totals_sticky(tt["room"], tt["equip"], tt["tech"], tt["net"])
 
     try:
         groups_df, items, group_meta = load_equipment_data()
@@ -1520,14 +1582,14 @@ def main():
         end_ts = pd.Timestamp(end_date)
         days = build_date_range(start_ts, end_ts)
         if not days:
+            _clear_calc_cache()
             st.error("日付範囲が不正です（終了日が開始日より前です）。")
             st.stop()
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
 
         rooms_selected = st.multiselect("部屋（複数選択可）", room_candidates, default=[])
-        # --- 修正②: 部屋未選択時は全部屋ではなく空リストにする ---
-        selected_rooms = rooms_selected  # 空リストのまま保持
+        selected_rooms = rooms_selected
 
         default_room_slot = st.selectbox(
             "部屋の区分（新規追加の初期値）",
@@ -1600,7 +1662,6 @@ def main():
 
         room_day_key = f"room_day_{start_date}_{end_date}"
 
-        # --- 修正②: 部屋未選択の場合はテーブルを空にする ---
         if not selected_rooms:
             st.session_state[room_day_key] = pd.DataFrame()
             st.info("部屋を選択してください。")
@@ -1610,7 +1671,6 @@ def main():
             else:
                 st.session_state[room_day_key] = merge_room_day(st.session_state[room_day_key], edited_days, list(selected_rooms), default_room_slot)
 
-        # 部屋が選択されている場合のみフィルターとテーブル編集を表示
         if selected_rooms:
             st.markdown("### フィルター")
             f1, f2 = st.columns([1, 1])
@@ -1657,6 +1717,13 @@ def main():
                 st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
                 st.dataframe(view_df, use_container_width=True)
 
+    if not selected_rooms:
+        _clear_calc_cache()
+        with right:
+            st.subheader("2) 設備・技術者・インターネット（入力）")
+            st.info("左側で部屋を1つ以上選択すると、このエリアの入力が表示されます。")
+        return
+
     with right:
         st.subheader("2) 設備・技術者・インターネット（入力）")
 
@@ -1689,7 +1756,7 @@ def main():
             targets = parse_rooms_cell(meta.applies_to_rooms)
             if targets == ["*"]:
                 return True
-            return bool(set(targets) & selected_rooms_set) if selected_rooms_set else True
+            return bool(set(targets) & selected_rooms_set) if selected_rooms_set else False
 
         group_overrides: Dict[str, str] = {}
         with st.expander("設備の区分（グループ単位の上書き：任意）", expanded=False):
@@ -1802,7 +1869,13 @@ def main():
         st.divider()
 
         st.markdown("### 舞台設備技術者")
-        tech_people = st.number_input("人数", min_value=0, value=0, step=1, help="日別設定の「技術者区分」×人数で計算します。")
+        tech_people = st.number_input(
+            "人数",
+            min_value=0,
+            value=0,
+            step=1,
+            help="日別設定の「技術者区分」×人数で計算します。最終的な人数・区分は打ち合わせ内容により決定します。",
+        )
 
         st.divider()
 
@@ -1811,18 +1884,40 @@ def main():
         use_fixed_line = st.checkbox("常設回線（初日18,000円、2日目以降2,000円）", value=False)
         use_temp_line = st.checkbox("仮設回線（5,000円/回 + 別途見積）", value=False)
 
-        st.divider()
+        current_sig = _make_input_signature(
+            start_date=start_date,
+            end_date=end_date,
+            selected_rooms=selected_rooms,
+            default_room_slot=default_room_slot,
+            is_business_default=is_business_default,
+            edited_days=edited_days,
+            room_day_df=room_day_df,
+            group_overrides=group_overrides,
+            base_selections=base_selections,
+            gallery_678=gallery_678,
+            tech_people=int(tech_people),
+            use_pocket_wifi=bool(use_pocket_wifi),
+            use_fixed_line=bool(use_fixed_line),
+            use_temp_line=bool(use_temp_line),
+        )
 
+        previous_sig = st.session_state.get("last_input_signature")
+        if not st.session_state.get("calc_done", False):
+            st.session_state.pop("last_input_signature", None)
+
+        if not st.session_state.get("calc_done", False):
+            pass
+        elif previous_sig != current_sig:
+            _clear_calc_cache()
+            st.info("入力内容が変更されたため、前回の計算結果をクリアしました。もう一度「計算する」を押してください。")
+        elif "last_totals" in st.session_state:
+            tt = st.session_state["last_totals"]
+            render_totals_sticky(tt["room"], tt["equip"], tt["tech"], tt["net"])
+
+        st.divider()
         do_calc = st.button("計算する", type="primary")
 
         if do_calc:
-            # --- 修正②: 部屋未選択時は計算を止める ---
-            if not selected_rooms:
-                st.warning("部屋を選択してください。左側の「部屋」欄から1つ以上の部屋を選んでから計算してください。")
-                # 計算済みフラグをクリア
-                st.session_state["calc_done"] = False
-                st.stop()
-
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
 
             equipment_total, equipment_df = calc_equipment_total_all_days(
@@ -1847,8 +1942,8 @@ def main():
 
             st.subheader("結果")
 
-            # --- 修正①: 計算済みフラグをセット ---
             st.session_state["calc_done"] = True
+            st.session_state["last_input_signature"] = current_sig
             st.session_state["last_totals"] = {
                 "room": room_total,
                 "equip": equipment_total,
@@ -1858,7 +1953,6 @@ def main():
 
             render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
 
-            # --- 修正③: 休館日がある場合、結果エリアにメッセージを表示 ---
             closed_day_dates = _collect_closed_day_dates(edited_days)
             if closed_day_dates:
                 closed_msg = " / ".join(closed_day_dates[:20])
@@ -1883,6 +1977,7 @@ def main():
 
             with tab_all:
                 frames = []
+
                 if not room_df.empty:
                     r = room_df.copy()
                     r = r.rename(columns={"品目": "名称"})
@@ -1899,13 +1994,15 @@ def main():
                     t = tech_df.copy()
                     t["カテゴリ"] = "技術者"
                     t["名称"] = "舞台設備技術者"
-                    frames.append(t.rename(columns={"小計": "小計"})[["日付", "カテゴリ", "名称", "区分", "小計"]])
+                    t["備考"] = "参考入力"
+                    frames.append(t[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
 
                 if not internet_df.empty:
                     n = internet_df.copy()
                     n["カテゴリ"] = "インターネット"
                     n = n.rename(columns={"品目": "名称"})
-                    frames.append(n.rename(columns={"小計": "小計"})[["日付", "カテゴリ", "名称", "フロア", "小計", "備考"]])
+                    n["区分"] = n["フロア"]
+                    frames.append(n[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
 
                 if frames:
                     all_df = pd.concat(frames, ignore_index=True)
