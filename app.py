@@ -1450,6 +1450,17 @@ def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, in
 
 
 # =========================
+# 休館日情報を収集するヘルパー
+# =========================
+def _collect_closed_day_dates(days_df: pd.DataFrame) -> List[str]:
+    """日別設定から休館日の日付文字列リストを返す"""
+    if days_df is None or days_df.empty:
+        return []
+    mask = days_df["休館日"] == True
+    return days_df.loc[mask, "日付"].astype(str).tolist()
+
+
+# =========================
 # Main App
 # =========================
 def main():
@@ -1458,7 +1469,8 @@ def main():
 
     inject_ui_css()
 
-    if "last_totals" in st.session_state:
+    # --- 修正①: 計算済みフラグがある場合のみ sticky を表示 ---
+    if st.session_state.get("calc_done", False) and "last_totals" in st.session_state:
         tt = st.session_state["last_totals"]
         render_totals_sticky(tt["room"], tt["equip"], tt["tech"], tt["net"])
 
@@ -1513,8 +1525,9 @@ def main():
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
 
-        rooms_selected = st.multiselect("部屋（複数選択可 / 未選択＝全部屋）", room_candidates, default=[])
-        selected_rooms = rooms_selected if rooms_selected else room_candidates
+        rooms_selected = st.multiselect("部屋（複数選択可）", room_candidates, default=[])
+        # --- 修正②: 部屋未選択時は全部屋ではなく空リストにする ---
+        selected_rooms = rooms_selected  # 空リストのまま保持
 
         default_room_slot = st.selectbox(
             "部屋の区分（新規追加の初期値）",
@@ -1587,55 +1600,62 @@ def main():
 
         room_day_key = f"room_day_{start_date}_{end_date}"
 
-        if room_day_key not in st.session_state:
-            st.session_state[room_day_key] = build_room_day_base(edited_days, list(selected_rooms), default_room_slot)
+        # --- 修正②: 部屋未選択の場合はテーブルを空にする ---
+        if not selected_rooms:
+            st.session_state[room_day_key] = pd.DataFrame()
+            st.info("部屋を選択してください。")
         else:
-            st.session_state[room_day_key] = merge_room_day(st.session_state[room_day_key], edited_days, list(selected_rooms), default_room_slot)
+            if room_day_key not in st.session_state:
+                st.session_state[room_day_key] = build_room_day_base(edited_days, list(selected_rooms), default_room_slot)
+            else:
+                st.session_state[room_day_key] = merge_room_day(st.session_state[room_day_key], edited_days, list(selected_rooms), default_room_slot)
 
-        st.markdown("### フィルター")
-        f1, f2 = st.columns([1, 1])
-        all_dates = sorted(st.session_state[room_day_key]["日付"].unique().tolist()) if not st.session_state[room_day_key].empty else []
-        date_filter = f1.multiselect("日付（未選択＝全日）", options=all_dates, default=[], key=f"filter_dates_{room_day_key}")
-        all_rooms_in_table = sorted(st.session_state[room_day_key]["部屋"].unique().tolist()) if not st.session_state[room_day_key].empty else []
-        room_filter = f2.multiselect("部屋（未選択＝全部屋）", options=all_rooms_in_table, default=[], key=f"filter_rooms_{room_day_key}")
+        # 部屋が選択されている場合のみフィルターとテーブル編集を表示
+        if selected_rooms:
+            st.markdown("### フィルター")
+            f1, f2 = st.columns([1, 1])
+            all_dates = sorted(st.session_state[room_day_key]["日付"].unique().tolist()) if not st.session_state[room_day_key].empty else []
+            date_filter = f1.multiselect("日付（未選択＝全日）", options=all_dates, default=[], key=f"filter_dates_{room_day_key}")
+            all_rooms_in_table = sorted(st.session_state[room_day_key]["部屋"].unique().tolist()) if not st.session_state[room_day_key].empty else []
+            room_filter = f2.multiselect("部屋（未選択＝全部屋）", options=all_rooms_in_table, default=[], key=f"filter_rooms_{room_day_key}")
 
-        view_df = st.session_state[room_day_key].copy()
-        if date_filter:
-            view_df = view_df[view_df["日付"].isin(date_filter)]
-        if room_filter:
-            view_df = view_df[view_df["部屋"].isin(room_filter)]
-        view_df = view_df.reset_index(drop=True)
+            view_df = st.session_state[room_day_key].copy()
+            if date_filter:
+                view_df = view_df[view_df["日付"].isin(date_filter)]
+            if room_filter:
+                view_df = view_df[view_df["部屋"].isin(room_filter)]
+            view_df = view_df.reset_index(drop=True)
 
-        try:
-            with st.form("room_day_form", clear_on_submit=False):
-                edited_room_day_tmp = st.data_editor(
-                    view_df,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    column_config={
-                        "日付": st.column_config.TextColumn(disabled=True),
-                        "土日祝": st.column_config.TextColumn(disabled=True),
-                        "祝日名": st.column_config.TextColumn(disabled=True),
-                        "休館日": st.column_config.CheckboxColumn(disabled=True),
-                        "部屋": st.column_config.TextColumn(disabled=True),
-                        "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
-                        "延長": st.column_config.SelectboxColumn(options=ROOM_EXTENSION_SLOTS),
-                        "割増利用": st.column_config.CheckboxColumn(),
-                        "手動区分": st.column_config.CheckboxColumn(disabled=True),
-                        "手動延長": st.column_config.CheckboxColumn(disabled=True),
-                        "手動割増": st.column_config.CheckboxColumn(disabled=True),
-                    },
-                )
-                submitted = st.form_submit_button("この表の変更を反映（確定）")
+            try:
+                with st.form("room_day_form", clear_on_submit=False):
+                    edited_room_day_tmp = st.data_editor(
+                        view_df,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        column_config={
+                            "日付": st.column_config.TextColumn(disabled=True),
+                            "土日祝": st.column_config.TextColumn(disabled=True),
+                            "祝日名": st.column_config.TextColumn(disabled=True),
+                            "休館日": st.column_config.CheckboxColumn(disabled=True),
+                            "部屋": st.column_config.TextColumn(disabled=True),
+                            "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
+                            "延長": st.column_config.SelectboxColumn(options=ROOM_EXTENSION_SLOTS),
+                            "割増利用": st.column_config.CheckboxColumn(),
+                            "手動区分": st.column_config.CheckboxColumn(disabled=True),
+                            "手動延長": st.column_config.CheckboxColumn(disabled=True),
+                            "手動割増": st.column_config.CheckboxColumn(disabled=True),
+                        },
+                    )
+                    submitted = st.form_submit_button("この表の変更を反映（確定）")
 
-            if submitted:
-                updated_full = apply_room_day_edits(st.session_state[room_day_key], edited_room_day_tmp, default_room_slot)
-                st.session_state[room_day_key] = updated_full
-                st.success("反映しました。続けて「計算する」を押してください。")
+                if submitted:
+                    updated_full = apply_room_day_edits(st.session_state[room_day_key], edited_room_day_tmp, default_room_slot)
+                    st.session_state[room_day_key] = updated_full
+                    st.success("反映しました。続けて「計算する」を押してください。")
 
-        except Exception:
-            st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
-            st.dataframe(view_df, use_container_width=True)
+            except Exception:
+                st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
+                st.dataframe(view_df, use_container_width=True)
 
     with right:
         st.subheader("2) 設備・技術者・インターネット（入力）")
@@ -1796,6 +1816,13 @@ def main():
         do_calc = st.button("計算する", type="primary")
 
         if do_calc:
+            # --- 修正②: 部屋未選択時は計算を止める ---
+            if not selected_rooms:
+                st.warning("部屋を選択してください。左側の「部屋」欄から1つ以上の部屋を選んでから計算してください。")
+                # 計算済みフラグをクリア
+                st.session_state["calc_done"] = False
+                st.stop()
+
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
 
             equipment_total, equipment_df = calc_equipment_total_all_days(
@@ -1820,6 +1847,8 @@ def main():
 
             st.subheader("結果")
 
+            # --- 修正①: 計算済みフラグをセット ---
+            st.session_state["calc_done"] = True
             st.session_state["last_totals"] = {
                 "room": room_total,
                 "equip": equipment_total,
@@ -1828,6 +1857,14 @@ def main():
             }
 
             render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
+
+            # --- 修正③: 休館日がある場合、結果エリアにメッセージを表示 ---
+            closed_day_dates = _collect_closed_day_dates(edited_days)
+            if closed_day_dates:
+                closed_msg = " / ".join(closed_day_dates[:20])
+                suffix = "…" if len(closed_day_dates) > 20 else ""
+                st.info(f"以下の休館日は計算から除外されています：{closed_msg}{suffix}")
+
             render_kpis_cards(room_total, equipment_total, tech_total, internet_total)
 
             tab_all, tab_rooms, tab_eq, tab_tech, tab_net = st.tabs(["明細（全部）", "部屋", "設備", "技術者", "インターネット"])
