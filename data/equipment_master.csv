@@ -44,8 +44,9 @@ mid_stageprops_cloth,stage_props,クロス,枚,0,660,,※枚数に限りあり,1
 cable_pc_10m,stage_props,PCケーブル（10m）,本,0,2200,,,1,0
 hdmi_ext_10m,stage_props,HDMI延長（10m）,本,0,2200,,,1,0
 hdmi_ext_15m,stage_props,HDMI延長（15m）,本,0,3300,,,1,0
-setup_large,setup_mid,設営代（大規模設営）,式,0,36670,,151席〜300席など,1,0
-setup_small,setup_mid,設営代（小規模設営）,式,0,26180,,150席までなど,1,0
+setup_large,setup_mid,設営代（大規模設営）,式,0,55000,,椅子のみ251席以上,1,0
+setup_small,setup_mid,設営代（小規模設営）,式,0,33800,,椅子のみ250席まで,1,0
+setup_special,setup_mid,設営代（特殊設営）,式,0,101400,,扇型などの変形・短時間設営など,1,0
 hallbig_border_light,hall_big_light,ボーダーライト,列,1000,0,,,1,0
 hallbig_suspension_light,hall_big_light,サスペンションライト,列,1500,0,,地明かり,1,0
 hallbig_front_side_spot,hall_big_light,フロントサイドスポットライト,式,3000,0,,,1,0
