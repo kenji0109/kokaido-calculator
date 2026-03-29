@@ -100,17 +100,30 @@ stageprops_big_cloth,stage_props_big,クロス,枚,0,660,,※枚数に限りあ�
 stageprops_big_pc_cable_proj,stage_props_big,PCケーブル（パソコン⇔プロジェクター間コード）,式,0,22000,,70m,1,0
 stageprops_big_hdmi_dsub_10m,stage_props_big,HDMI延長／D-sub延長,式,0,2200,,10m,1,0
 stageprops_big_hdmi_dsub_20m,stage_props_big,HDMI延長／D-sub延長,式,0,4400,,20m,1,0
-piano_big_tuning,piano_big,調律料金,式,21000,0,,※ピアノ利用時は必須,1,0
-piano_big_pitch_change,piano_big,ピッチ変更・戻し料（441〜443Hz以外）,式,21000,0,,,1,0
+piano_big_tuning,piano_big,調律料金,式,23300,0,,※ピアノ利用時は必須,1,0
+piano_big_pitch_change,piano_big,ピッチ変更・戻し料（441〜443Hz以外）,式,23300,0,,,1,0
+piano_big_attendance,piano_big,立ち合い（1時間あたり）,時間,0,4750,,,1,0
+piano_big_night_surcharge,piano_big,夜間割り増し（1時間あたり 19:00〜21:00）,時間,0,3050,,,1,0
 piano_mid_gp_bechstein_225,piano_mid,グランドピアノ（ベーゼンドルファー225）,台,8000,0,,（調律代別途）,1,0
-piano_mid_tuning,piano_mid,調律料金,式,22700,0,,※ピアノ利用時は必須,1,0
-piano_mid_pitch_change,piano_mid,ピッチ変更・戻し料（442Hz以外）,式,22700,0,,,1,0
+piano_mid_tuning,piano_mid,調律料金,式,29800,0,,※ピアノ利用時は必須,1,0
+piano_mid_pitch_change,piano_mid,ピッチ変更・戻し料（442Hz以外）,式,29800,0,,,1,0
+piano_mid_attendance,piano_mid,立ち合い（1時間あたり）,時間,0,4750,,,1,0
+piano_mid_night_surcharge,piano_mid,夜間割り増し（1時間あたり 19:00〜21:00）,時間,0,3800,,,1,0
 piano_small_gp_yamaha_c2l,piano_small,グランドピアノ（ヤマハC2L）,台,5000,0,,（調律代別途）,1,0
-piano_small_tuning,piano_small,調律料金,式,18700,0,,※ピアノ利用時は必須,1,0
+piano_small_tuning,piano_small,調律料金,式,20700,0,,※ピアノ利用時は必須,1,0
+piano_small_pitch_change,piano_small,ピッチ変更・戻し料,式,20700,0,,,1,0
+piano_small_attendance,piano_small,立ち合い（1時間あたり）,時間,0,4750,,,1,0
+piano_small_night_surcharge,piano_small,夜間割り増し（1時間あたり 19:00〜21:00）,時間,0,3050,,,1,0
 piano_special_upright_yamaha_w106,piano_special,アップライトピアノ（ヤマハ木目調W106）,台,3000,0,,（調律代別途）,1,0
-piano_special_tuning,piano_special,調律料金,式,15200,0,,※ピアノ利用時は必須,1,0
+piano_special_tuning,piano_special,調律料金,式,18200,0,,※ピアノ利用時は必須,1,0
+piano_special_pitch_change,piano_special,ピッチ変更・戻し料,式,18200,0,,,1,0
+piano_special_attendance,piano_special,立ち合い（1時間あたり）,時間,0,4750,,,1,0
+piano_special_night_surcharge,piano_special,夜間割り増し（1時間あたり 19:00〜21:00）,時間,0,3050,,,1,0
 piano_conf_upright_yamaha_u3m,piano_conf,アップライトピアノ（ヤマハU3M）,台,3000,0,,（調律代別途）,1,0
-piano_conf_tuning,piano_conf,調律料金,式,15200,0,,※ピアノ利用時は必須,1,0
+piano_conf_tuning,piano_conf,調律料金,式,18200,0,,※ピアノ利用時は必須,1,0
+piano_conf_pitch_change,piano_conf,ピッチ変更・戻し料,式,18200,0,,,1,0
+piano_conf_attendance,piano_conf,立ち合い（1時間あたり）,時間,0,4750,,,1,0
+piano_conf_night_surcharge,piano_conf,夜間割り増し（1時間あたり 19:00〜21:00）,時間,0,3050,,,1,0
 conf_rec_play_wagon,conf_common,録音再生ワゴン,台,2000,0,pa_c|pa_d,（拡声装置C、D別途要）,1,0
 conf_ohp_a,conf_common,オーバーヘッドプロジェクターA,台,3000,0,,,1,0
 conf_ohp_b,conf_common,オーバーヘッドプロジェクターB,台,2000,0,,,1,0
