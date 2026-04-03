@@ -13,7 +13,6 @@ import streamlit as st
 
 # 祝日判定（入ってなければ週末のみ判定）
 
-if importlib.util.find_spec(“jpholiday”) is not None:
 import jpholiday  # type: ignore
 else:
 jpholiday = None
