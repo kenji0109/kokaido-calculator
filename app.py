@@ -13,6 +13,7 @@ import streamlit as st
 
 # 祝日判定（入ってなければ週末のみ判定）
 
+if importlib.util.find_spec(“jpholiday”) is not None:
 import jpholiday  # type: ignore
 else:
 jpholiday = None
@@ -23,7 +24,7 @@ jpholiday = None
 
 # =========================
 
-APP_TITLE = "公会堂料金電卓 （部屋×日編集＋設備＋技術者＋インターネット)"
+APP_TITLE = “公会堂料金電卓 （部屋×日編集＋設備＋技術者＋インターネット）”
 DATA_DIR = Path(**file**).parent / “data”
 
 PRICES_CSV = DATA_DIR / “prices.csv”
