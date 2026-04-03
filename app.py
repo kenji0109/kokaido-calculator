@@ -981,13 +981,13 @@ def merge_room_day(
 
     merged.loc[merged["手動区分"], "区分"] = merged.loc[merged["手動区分"], "区分_old"].fillna(
         merged.loc[merged["手動区分"], "区分"]
-    )
+    ).astype(str)
     merged.loc[merged["手動延長"], "延長"] = merged.loc[merged["手動延長"], "延長_old"].fillna(
         merged.loc[merged["手動延長"], "延長"]
-    )
+    ).astype(str)
     merged.loc[merged["手動割増"], "割増利用"] = merged.loc[merged["手動割増"], "割増利用_old"].fillna(
         merged.loc[merged["手動割増"], "割増利用"]
-    )
+    ).astype(bool)
 
     drop_cols = [c for c in merged.columns if c.endswith("_old")]
     if drop_cols:
