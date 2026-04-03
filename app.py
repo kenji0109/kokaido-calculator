@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 import hashlib
@@ -11,9 +12,9 @@ import pandas as pd
 import streamlit as st
 
 # 祝日判定（入ってなければ週末のみ判定）
-try:
+if importlib.util.find_spec("jpholiday") is not None:
     import jpholiday  # type: ignore
-except Exception:
+else:
     jpholiday = None
 
 # =========================
