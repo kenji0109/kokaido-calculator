@@ -41,7 +41,6 @@ ROOM_SLOTS_WITH_NONE = ["利用なし"] + ROOM_BASE_SLOTS
 ROOM_EXTENSION_SLOTS = ["なし", "前延長30分", "後延長30分", "前後延長30分"]
 
 EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
-
 TECH_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 
 # =========================
@@ -53,16 +52,16 @@ MIC_D_ROOMS = {"第6会議室", "第7会議室", "第8会議室"}
 
 MIC_WIRED_ID = "mic_wired"
 MIC_WIRELESS_ID = "mic_wireless"
-MIC_STAND_ID = "mic_stand"  # 追加
+MIC_STAND_ID = "mic_stand"
 PA_C_ID = "pa_c"
 PA_D_ID = "pa_d"
 
 # 「拡声装置にマイク1本・スタンド1本付属」を控除する対象
 PA_ITEMS_WITH_INCLUDED_MIC = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}
-PA_ITEMS_WITH_INCLUDED_STAND = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}  # 追加
+PA_ITEMS_WITH_INCLUDED_STAND = {PA_C_ID, PA_D_ID, "pa_a", "pa_b"}
 
 MIC_ITEMS = {MIC_WIRED_ID, MIC_WIRELESS_ID}
-STAND_ITEMS = {MIC_STAND_ID}  # 追加
+STAND_ITEMS = {MIC_STAND_ID}
 
 MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_C_ID, PA_D_ID}
 
@@ -77,12 +76,10 @@ def read_csv_safely(path: Path) -> pd.DataFrame:
     except UnicodeDecodeError:
         return pd.read_csv(path, encoding="cp932")
 
-
 def normalize_str(x) -> str:
     if pd.isna(x):
         return ""
     return str(x).strip()
-
 
 def _to_int(x) -> int:
     if pd.isna(x) or str(x).strip() == "":
@@ -91,7 +88,6 @@ def _to_int(x) -> int:
         return int(float(x))
     except Exception:
         return 0
-
 
 def parse_date_str(s: str) -> Optional[pd.Timestamp]:
     s = normalize_str(s)
@@ -104,20 +100,16 @@ def parse_date_str(s: str) -> Optional[pd.Timestamp]:
         return None
     return pd.Timestamp(ts)
 
-
 # =========================
 # applies_to_rooms パーサ
 # =========================
 _RANGE_PAT = re.compile(r"第\s*(\d+)\s*[〜～\-－—]\s*(?:第\s*)?(\d+)\s*会議室")
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
-
 def _normalize_digits(s: str) -> str:
     return s.translate(_FULLWIDTH_DIGITS)
 
-
 _ROOM_NAME_PAT = re.compile(r"(大会議室|大集会室|中集会室|小集会室|特別室|控え室\s*1|控え室\s*2|控室\s*1|控室\s*2|第\s*\d+\s*会議室)")
-
 
 def _expand_room_range(token: str) -> List[str]:
     t = normalize_str(token)
@@ -129,7 +121,6 @@ def _expand_room_range(token: str) -> List[str]:
     b = int(m.group(2))
     lo, hi = (a, b) if a <= b else (b, a)
     return [f"第{i}会議室" for i in range(lo, hi + 1)]
-
 
 def parse_rooms_cell(cell: str) -> List[str]:
     s = normalize_str(cell)
@@ -148,7 +139,6 @@ def parse_rooms_cell(cell: str) -> List[str]:
         out.extend(_expand_room_range(t))
 
     return out if out else ["*"]
-
 
 def infer_item_target_rooms(item_name: str, notes: str, fallback: str) -> str:
     text = _normalize_digits(f"{item_name} {notes}")
@@ -170,7 +160,6 @@ def infer_item_target_rooms(item_name: str, notes: str, fallback: str) -> str:
         return " / ".join(sorted(targets))
     return fallback if fallback else "*"
 
-
 def parse_requires_groups(cell: str) -> List[List[str]]:
     s = normalize_str(cell)
     if s == "" or s == "*" or s.lower() == "all":
@@ -185,7 +174,6 @@ def parse_requires_groups(cell: str) -> List[List[str]]:
             groups.append(alts)
     return groups
 
-
 # =========================
 # Date / Holiday
 # =========================
@@ -198,7 +186,6 @@ def holiday_name(date: pd.Timestamp) -> str:
     except Exception:
         return ""
 
-
 def is_weekend_or_holiday(date: pd.Timestamp) -> bool:
     if date.weekday() >= 5:
         return True
@@ -209,12 +196,10 @@ def is_weekend_or_holiday(date: pd.Timestamp) -> bool:
             pass
     return False
 
-
 def build_date_range(start: pd.Timestamp, end: pd.Timestamp) -> List[pd.Timestamp]:
     if end < start:
         return []
     return list(pd.date_range(start=start, end=end, freq="D"))
-
 
 def load_closed_days() -> set:
     if not CLOSED_DAYS_CSV.exists():
@@ -225,7 +210,6 @@ def load_closed_days() -> set:
 
     s = pd.to_datetime(df["date"], errors="coerce").dropna()
     return set(s.dt.date.tolist())
-
 
 # =========================
 # Equipment
@@ -243,7 +227,6 @@ class EquipmentItem:
     is_countable: int
     is_power_item: int
 
-
 @dataclass
 class GroupMeta:
     group_id: str
@@ -251,7 +234,6 @@ class GroupMeta:
     applies_to_rooms: str
     default_inherit_room_slot: int
     allowed_slot_override: int
-
 
 def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[str, GroupMeta]]:
     groups_df = read_csv_safely(EQUIPMENT_GROUPS_CSV)
@@ -328,7 +310,6 @@ def load_equipment_data() -> Tuple[pd.DataFrame, Dict[str, EquipmentItem], Dict[
 
     return groups_df, items, group_meta
 
-
 def slot_to_multiplier(slot: str) -> int:
     mapping = {
         "利用なし": 0,
@@ -341,7 +322,6 @@ def slot_to_multiplier(slot: str) -> int:
         "延長30分": 1,
     }
     return mapping.get(slot, 1)
-
 
 def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optional[str]:
     opts = set(options)
@@ -358,7 +338,6 @@ def resolve_required_option(options: List[str], ctx: Dict[str, object]) -> Optio
         return PA_C_ID if PA_C_ID in opts else (options[0] if options else None)
 
     return options[0] if options else None
-
 
 def collect_required_items(
     selected_item_ids: List[str],
@@ -383,7 +362,6 @@ def collect_required_items(
                     added = True
     return list(selected_set)
 
-
 def _fix_equip_cell(v: object) -> str:
     s = normalize_str(v)
     if s == "" or s.lower() == "none":
@@ -391,7 +369,6 @@ def _fix_equip_cell(v: object) -> str:
     if s not in EQUIPMENT_TIME_SLOTS:
         return "利用なし"
     return s
-
 
 def _fix_room_slot(v: object, default_slot: str) -> str:
     s = normalize_str(v)
@@ -401,7 +378,6 @@ def _fix_room_slot(v: object, default_slot: str) -> str:
         return default_slot
     return s
 
-
 def _fix_room_extension(v: object) -> str:
     s = normalize_str(v)
     if s == "" or s.lower() == "none":
@@ -409,7 +385,6 @@ def _fix_room_extension(v: object) -> str:
     if s not in ROOM_EXTENSION_SLOTS:
         return "なし"
     return s
-
 
 def _fix_tech_slot(v: object) -> str:
     s = normalize_str(v)
@@ -419,10 +394,8 @@ def _fix_tech_slot(v: object) -> str:
         return "利用なし"
     return s
 
-
 def _safe_set(s: Set[str]) -> Set[str]:
-    return set([x for x in s if x])
-
+    return {x for x in s if x}
 
 def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tuple[bool, str]:
     rooms_used = _safe_set(rooms_used)
@@ -444,7 +417,6 @@ def infer_mic_allowed_for_rooms(rooms_used: Set[str], gallery_678: bool) -> Tupl
 
     return False, "マイク対象部屋（大会議室/小集会室 または 第6〜8条件）が含まれていません"
 
-
 def _is_mic_related_item_allowed_today(iid: str, ctx: Dict[str, object], mic_allowed_today: bool) -> bool:
     need_c = bool(ctx.get("need_pa_c", False))
     need_d = bool(ctx.get("need_pa_d", False))
@@ -457,7 +429,6 @@ def _is_mic_related_item_allowed_today(iid: str, ctx: Dict[str, object], mic_all
         return mic_allowed_today
     return True
 
-
 def calc_equipment_total_for_day(
     day_slot_default: str,
     global_fallback_slot: str,
@@ -468,7 +439,10 @@ def calc_equipment_total_for_day(
     requires_context: Dict[str, object],
     mic_allowed_today: bool,
 ) -> Tuple[int, pd.DataFrame]:
-    cols = ["種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"]
+    cols = [
+        "種別", "グループ", "品目", "課金タイプ", "区分", "数量",
+        "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"
+    ]
     if not selections:
         return 0, pd.DataFrame(columns=cols)
 
@@ -483,7 +457,7 @@ def calc_equipment_total_for_day(
             if key not in existing:
                 selections.append({"group_id": it.group_id, "item_id": it.item_id, "qty": 1, "auto_added": True})
 
-    # 付属マイク控除：数量調整
+    # ---- 付属マイク控除：数量調整 ----
     qty_map: Dict[str, int] = {}
     for s in selections:
         iid = s.get("item_id")
@@ -509,7 +483,7 @@ def calc_equipment_total_for_day(
     billed_qty_override = {MIC_WIRED_ID: bill_wired, MIC_WIRELESS_ID: bill_wireless}
     deducted_note = {MIC_WIRED_ID: used_w, MIC_WIRELESS_ID: used_ww}
 
-    # スタンド控除（マイクと同じロジック）
+    # スタンド控除
     included_stands = sum(qty_map.get(pid, 0) for pid in PA_ITEMS_WITH_INCLUDED_STAND)
     req_stand = qty_map.get(MIC_STAND_ID, 0)
     used_stand = min(included_stands, req_stand)
@@ -630,7 +604,6 @@ def calc_equipment_total_for_day(
         df = df.sort_values(["グループ", "品目"]).reset_index(drop=True)
     return total, df
 
-
 # =========================
 # Stage tech
 # =========================
@@ -644,7 +617,6 @@ STAGE_TECH_FEES_PER_PERSON = {
     "延長30分": 2750,
 }
 
-
 def calc_stage_tech_total_for_day(slot: str, people: int) -> Tuple[int, pd.DataFrame]:
     if people <= 0 or slot == "利用なし":
         return 0, pd.DataFrame(columns=["種別", "区分", "人数", "単価(1名)", "小計"])
@@ -654,7 +626,6 @@ def calc_stage_tech_total_for_day(slot: str, people: int) -> Tuple[int, pd.DataF
     subtotal = unit * people
     df = pd.DataFrame([{"種別": "技術者", "区分": slot, "人数": people, "単価(1名)": unit, "小計": subtotal}])
     return subtotal, df
-
 
 # =========================
 # Room prices
@@ -672,7 +643,6 @@ def load_prices_df() -> pd.DataFrame:
     df["amount"] = df["amount"].map(_to_int)
     return df
 
-
 def extension_to_pricing(ext: str, slots_in_prices: Set[str]) -> Tuple[str, int, str]:
     if ext in slots_in_prices:
         return ext, 1, ""
@@ -684,7 +654,6 @@ def extension_to_pricing(ext: str, slots_in_prices: Set[str]) -> Tuple[str, int,
 
     return "延長30分", 1, ""
 
-
 # =========================
 # Internet
 # =========================
@@ -695,7 +664,6 @@ INTERNET_TEMP_LINE_BASE = 5000
 
 FLOOR_1_ROOMS = {"大集会室"}
 FLOOR_3_ROOMS = {"中集会室", "小集会室"}
-
 
 # =========================
 # Day settings
@@ -718,7 +686,6 @@ def make_days_base(days: List[pd.Timestamp], closed_days: set, default_room_slot
     df["設備デフォ区分"] = df["設備デフォ区分"].apply(_fix_equip_cell)
     df["技術者区分"] = df["技術者区分"].apply(_fix_tech_slot)
     return df
-
 
 def sync_days_df_defaults(df: pd.DataFrame, old_defaults: Dict[str, object], new_defaults: Dict[str, object]) -> pd.DataFrame:
     df = df.copy()
@@ -745,7 +712,6 @@ def sync_days_df_defaults(df: pd.DataFrame, old_defaults: Dict[str, object], new
     df["技術者区分"] = df["技術者区分"].apply(_fix_tech_slot)
     return df
 
-
 # =========================
 # Room-Day table
 # =========================
@@ -754,7 +720,6 @@ def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
     for _, r in days_df.iterrows():
         m[normalize_str(r["日付"])] = bool(r.get("割増利用", False))
     return m
-
 
 def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], default_room_slot: str) -> pd.DataFrame:
     rows = []
@@ -788,7 +753,6 @@ def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], defaul
         df["割増利用"] = df["割増利用"].astype(bool)
     return df
 
-
 def merge_room_day(
     current: pd.DataFrame,
     days_df: pd.DataFrame,
@@ -812,38 +776,53 @@ def merge_room_day(
         cur["延長"] = "なし"
     if "手動延長" not in cur.columns:
         cur["手動延長"] = False
+    if "割増利用" not in cur.columns:
+        cur["割増利用"] = False
+    if "区分" not in cur.columns:
+        cur["区分"] = default_room_slot
 
-    key_cols = ["日付", "部屋"]
-    keep_cols = key_cols + ["区分", "延長", "割増利用", "手動区分", "手動延長", "手動割増"]
-    cur_small = cur[keep_cols].copy()
+    current_map = {}
+    for _, row in cur.iterrows():
+        key = (normalize_str(row.get("日付", "")), normalize_str(row.get("部屋", "")))
+        current_map[key] = {
+            "区分": _fix_room_slot(row.get("区分", ""), default_room_slot),
+            "延長": _fix_room_extension(row.get("延長", "なし")),
+            "割増利用": bool(row.get("割増利用", False)),
+            "手動区分": bool(row.get("手動区分", False)),
+            "手動延長": bool(row.get("手動延長", False)),
+            "手動割増": bool(row.get("手動割増", False)),
+        }
 
-    merged = base.merge(cur_small, on=key_cols, how="left", suffixes=("", "_old"))
+    rows = []
+    for _, row in base.iterrows():
+        out = row.to_dict()
+        key = (normalize_str(out.get("日付", "")), normalize_str(out.get("部屋", "")))
+        old = current_map.get(key)
 
-    merged["手動区分"] = merged["手動区分_old"].fillna(merged["手動区分"]).astype(bool)
-    merged["手動延長"] = merged["手動延長_old"].fillna(merged["手動延長"]).astype(bool)
-    merged["手動割増"] = merged["手動割増_old"].fillna(merged["手動割増"]).astype(bool)
+        if old is not None:
+            out["手動区分"] = old["手動区分"]
+            out["手動延長"] = old["手動延長"]
+            out["手動割増"] = old["手動割増"]
 
-    merged.loc[merged["手動区分"], "区分"] = merged.loc[merged["手動区分"], "区分_old"].fillna(
-        merged.loc[merged["手動区分"], "区分"]
-    )
-    merged.loc[merged["手動延長"], "延長"] = merged.loc[merged["手動延長"], "延長_old"].fillna(
-        merged.loc[merged["手動延長"], "延長"]
-    )
-    merged.loc[merged["手動割増"], "割増利用"] = merged.loc[merged["手動割増"], "割増利用_old"].fillna(
-        merged.loc[merged["手動割増"], "割増利用"]
-    )
+            if old["手動区分"]:
+                out["区分"] = old["区分"]
+            if old["手動延長"]:
+                out["延長"] = old["延長"]
+            if old["手動割増"]:
+                out["割増利用"] = old["割増利用"]
 
-    drop_cols = [c for c in merged.columns if c.endswith("_old")]
-    if drop_cols:
-        merged.drop(columns=drop_cols, inplace=True)
+        rows.append(out)
+
+    merged = pd.DataFrame(rows)
 
     if not merged.empty:
         merged["区分"] = merged["区分"].apply(lambda x: _fix_room_slot(x, default_room_slot))
         merged["延長"] = merged["延長"].apply(_fix_room_extension)
         merged["割増利用"] = merged["割増利用"].astype(bool)
+        merged["手動区分"] = merged["手動区分"].astype(bool)
+        merged["手動延長"] = merged["手動延長"].astype(bool)
+        merged["手動割増"] = merged["手動割増"].astype(bool)
     return merged
-
-
 def apply_room_day_edits(full_df: pd.DataFrame, edited_subset: pd.DataFrame, default_room_slot: str) -> pd.DataFrame:
     if full_df is None or full_df.empty or edited_subset is None or edited_subset.empty:
         return full_df
@@ -894,7 +873,6 @@ def apply_room_day_edits(full_df: pd.DataFrame, edited_subset: pd.DataFrame, def
     full["手動割増"] = full["手動割増"].astype(bool)
     return full
 
-
 # =========================
 # 計算（部屋）
 # =========================
@@ -928,7 +906,18 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
             note = ""
             if ext != "なし":
                 note = "部屋が「利用なし」のため延長は無視されます"
-            rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": "利用なし", "割増": is_business, "単価": 0, "小計": 0, "備考": note})
+            rows.append(
+                {
+                    "日付": dts.date(),
+                    "種別": "部屋",
+                    "品目": room,
+                    "区分": "利用なし",
+                    "割増": is_business,
+                    "単価": 0,
+                    "小計": 0,
+                    "備考": note,
+                }
+            )
             continue
 
         m = (
@@ -954,7 +943,18 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
         else:
             amount = int(hit.iloc[0]["amount"])
             total += amount
-            rows.append({"日付": dts.date(), "種別": "部屋", "品目": room, "区分": slot, "割増": is_business, "単価": amount, "小計": amount, "備考": ""})
+            rows.append(
+                {
+                    "日付": dts.date(),
+                    "種別": "部屋",
+                    "品目": room,
+                    "区分": slot,
+                    "割増": is_business,
+                    "単価": amount,
+                    "小計": amount,
+                    "備考": "",
+                }
+            )
 
         if ext != "なし":
             pricing_slot, mult, note = extension_to_pricing(ext, slots_in_prices)
@@ -999,7 +999,6 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
     df = pd.DataFrame(rows)
     return total, df
 
-
 # =========================
 # 計算用：日ごとの使用部屋を集計
 # =========================
@@ -1021,10 +1020,8 @@ def rooms_used_by_date(room_day_df: pd.DataFrame) -> Dict[str, Set[str]]:
         m.setdefault(date_str, set()).add(room)
     return m
 
-
 def active_dates_from_room_day(room_day_df: pd.DataFrame) -> List[str]:
     return sorted(list(rooms_used_by_date(room_day_df).keys()))
-
 
 # =========================
 # 計算（設備：全日合算）
@@ -1041,7 +1038,12 @@ def calc_equipment_total_all_days(
 ) -> Tuple[int, pd.DataFrame]:
     active_dates = active_dates_from_room_day(room_day_df)
     if not active_dates:
-        return 0, pd.DataFrame(columns=["日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"])
+        return 0, pd.DataFrame(
+            columns=[
+                "日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量",
+                "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"
+            ]
+        )
 
     day_slot_map = {normalize_str(r["日付"]): _fix_equip_cell(r.get("設備デフォ区分", "")) for _, r in days_df.iterrows()}
     used_rooms = rooms_used_by_date(room_day_df)
@@ -1083,11 +1085,20 @@ def calc_equipment_total_all_days(
 
     if all_rows:
         out = pd.concat(all_rows, ignore_index=True)
-        out = out[["日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"]]
+        out = out[
+            [
+                "日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量",
+                "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"
+            ]
+        ]
         return total, out
 
-    return 0, pd.DataFrame(columns=["日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量", "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"])
-
+    return 0, pd.DataFrame(
+        columns=[
+            "日付", "種別", "グループ", "品目", "課金タイプ", "区分", "数量",
+            "単価(1区分)", "倍率", "区分小計", "一回課金", "小計", "備考", "自動追加"
+        ]
+    )
 
 # =========================
 # 計算（技術者：全日合算）
@@ -1113,7 +1124,6 @@ def calc_stage_tech_total_all_days(days_df: pd.DataFrame, room_day_df: pd.DataFr
     out = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["日付", "種別", "区分", "人数", "単価(1名)", "小計"])
     return total, out
 
-
 # =========================
 # 計算（インターネット：全日合算）
 # =========================
@@ -1132,7 +1142,6 @@ def _split_consecutive_blocks(dates: List[pd.Timestamp]) -> List[List[pd.Timesta
     blocks.append(block)
     return blocks
 
-
 def infer_active_days_by_floor(room_day_df: pd.DataFrame) -> Dict[str, List[pd.Timestamp]]:
     ru = rooms_used_by_date(room_day_df)
     f1 = []
@@ -1146,7 +1155,6 @@ def infer_active_days_by_floor(room_day_df: pd.DataFrame) -> Dict[str, List[pd.T
         if rooms & FLOOR_3_ROOMS:
             f3.append(dt)
     return {"1F": sorted(f1), "3F": sorted(f3)}
-
 
 def calc_internet_total(
     room_day_df: pd.DataFrame,
@@ -1164,7 +1172,16 @@ def calc_internet_total(
 
     if use_pocket_wifi:
         for d in sorted(active_dates):
-            rows.append({"日付": d.date(), "種別": "インターネット", "品目": "ポケットWi-Fi貸出", "フロア": "全部屋", "小計": INTERNET_POCKET_WIFI_PER_DAY, "備考": "先着順/同時接続目安5台/電波不安定の可能性"})
+            rows.append(
+                {
+                    "日付": d.date(),
+                    "種別": "インターネット",
+                    "品目": "ポケットWi-Fi貸出",
+                    "フロア": "全部屋",
+                    "小計": INTERNET_POCKET_WIFI_PER_DAY,
+                    "備考": "先着順/同時接続目安5台/電波不安定の可能性",
+                }
+            )
             total += INTERNET_POCKET_WIFI_PER_DAY
 
     floors = infer_active_days_by_floor(room_day_df)
@@ -1175,10 +1192,28 @@ def calc_internet_total(
             for b in blocks:
                 if not b:
                     continue
-                rows.append({"日付": b[0].date(), "種別": "インターネット", "品目": "常設回線（初日）", "フロア": floor_label, "小計": INTERNET_FIXED_FIRST_DAY, "備考": "連続利用の段階料金"})
+                rows.append(
+                    {
+                        "日付": b[0].date(),
+                        "種別": "インターネット",
+                        "品目": "常設回線（初日）",
+                        "フロア": floor_label,
+                        "小計": INTERNET_FIXED_FIRST_DAY,
+                        "備考": "連続利用の段階料金",
+                    }
+                )
                 total += INTERNET_FIXED_FIRST_DAY
                 for d in b[1:]:
-                    rows.append({"日付": d.date(), "種別": "インターネット", "品目": "常設回線（2日目以降）", "フロア": floor_label, "小計": INTERNET_FIXED_AFTER_DAY, "備考": "連続利用の段階料金"})
+                    rows.append(
+                        {
+                            "日付": d.date(),
+                            "種別": "インターネット",
+                            "品目": "常設回線（2日目以降）",
+                            "フロア": floor_label,
+                            "小計": INTERNET_FIXED_AFTER_DAY,
+                            "備考": "連続利用の段階料金",
+                        }
+                    )
                     total += INTERNET_FIXED_AFTER_DAY
 
     if use_temp_line:
@@ -1187,12 +1222,20 @@ def calc_internet_total(
             for b in blocks:
                 if not b:
                     continue
-                rows.append({"日付": b[0].date(), "種別": "インターネット", "品目": "仮設回線（開通工事）", "フロア": floor_label, "小計": INTERNET_TEMP_LINE_BASE, "備考": "＋別途お見積り（NTT回線開通工事）"})
+                rows.append(
+                    {
+                        "日付": b[0].date(),
+                        "種別": "インターネット",
+                        "品目": "仮設回線（開通工事）",
+                        "フロア": floor_label,
+                        "小計": INTERNET_TEMP_LINE_BASE,
+                        "備考": "＋別途お見積り（NTT回線開通工事）",
+                    }
+                )
                 total += INTERNET_TEMP_LINE_BASE
 
     df = pd.DataFrame(rows, columns=["日付", "種別", "品目", "フロア", "小計", "備考"])
     return total, df
-
 
 # =========================
 # KPI Display
@@ -1202,7 +1245,6 @@ def yen(x: int) -> str:
         return f"¥{int(x):,}"
     except Exception:
         return f"¥{x}"
-
 
 def inject_ui_css():
     st.markdown(
@@ -1304,7 +1346,6 @@ def inject_ui_css():
         unsafe_allow_html=True,
     )
 
-
 def render_totals_sticky(room_total: int, equipment_total: int, tech_total: int, internet_total: int):
     grand_total = room_total + equipment_total + tech_total + internet_total
 
@@ -1328,7 +1369,6 @@ def render_totals_sticky(room_total: int, equipment_total: int, tech_total: int,
         """,
         unsafe_allow_html=True,
     )
-
 
 def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, internet_total: int):
     grand_total = room_total + equipment_total + tech_total + internet_total
@@ -1359,7 +1399,6 @@ def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, in
         )
     html.append("</div>")
     st.markdown("\n".join(html), unsafe_allow_html=True)
-
 
 # =========================
 # Main App
