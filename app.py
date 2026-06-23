@@ -660,8 +660,15 @@ def extension_to_pricing(ext: str, slots_in_prices: Set[str]) -> Tuple[str, int,
 INTERNET_POCKET_WIFI_PER_DAY = 2800
 INTERNET_FIXED_FIRST_DAY = 18000
 INTERNET_FIXED_AFTER_DAY = 2000
+INTERNET_WIFI_FIRST_DAY = 25000
+INTERNET_WIFI_AFTER_DAY = 3000
 INTERNET_TEMP_LINE_BASE = 5000
 
+INTERNET_NONE = "なし"
+INTERNET_WIRED = "有線LAN"
+INTERNET_WIFI = "Wi-Fi"
+INTERNET_WIRED_ROOMS = {"大集会室", "中集会室", "小集会室", "特別室"}
+INTERNET_WIFI_ROOMS = {"大集会室", "中集会室", "小集会室", "特別室", "大会議室"}
 FLOOR_1_ROOMS = {"大集会室"}
 FLOOR_3_ROOMS = {"中集会室", "小集会室"}
 
@@ -1156,87 +1163,104 @@ def infer_active_days_by_floor(room_day_df: pd.DataFrame) -> Dict[str, List[pd.T
             f3.append(dt)
     return {"1F": sorted(f1), "3F": sorted(f3)}
 
+def available_fixed_network_services(room: str) -> List[str]:
+    room = normalize_str(room)
+    options = [INTERNET_NONE]
+    if room in INTERNET_WIRED_ROOMS:
+        options.append(INTERNET_WIRED)
+    if room in INTERNET_WIFI_ROOMS:
+        options.append(INTERNET_WIFI)
+    return options
+
+
+def active_room_day_records(room_day_df: pd.DataFrame) -> List[Dict[str, object]]:
+    records: List[Dict[str, object]] = []
+    if room_day_df is None or room_day_df.empty:
+        return records
+
+    for _, r in room_day_df.iterrows():
+        if bool(r.get("休館日", False)):
+            continue
+        date_str = normalize_str(r.get("日付", ""))
+        room = normalize_str(r.get("部屋", ""))
+        slot = normalize_str(r.get("区分", ""))
+        ts = parse_date_str(date_str)
+        if ts is None or room == "" or slot == "利用なし":
+            continue
+        records.append({"date_str": date_str, "date": ts, "room": room})
+    return records
+
+
+def _internet_staged_price(service: str, is_first_day: bool) -> int:
+    if service == INTERNET_WIRED:
+        return INTERNET_FIXED_FIRST_DAY if is_first_day else INTERNET_FIXED_AFTER_DAY
+    if service == INTERNET_WIFI:
+        return INTERNET_WIFI_FIRST_DAY if is_first_day else INTERNET_WIFI_AFTER_DAY
+    return 0
+
+
+def _internet_service_item_name(service: str, is_first_day: bool) -> str:
+    suffix = "初日" if is_first_day else "2日目以降"
+    if service == INTERNET_WIRED:
+        return f"常設回線（有線LAN・{suffix}）"
+    if service == INTERNET_WIFI:
+        return f"Wi-Fi（{suffix}）"
+    return service
+
+
 def calc_internet_total(
     room_day_df: pd.DataFrame,
+    fixed_network_selections: Dict[Tuple[str, str], str],
     use_pocket_wifi: bool,
-    use_fixed_line: bool,
     use_temp_line: bool,
 ) -> Tuple[int, pd.DataFrame]:
-    active_dates = [parse_date_str(d) for d in active_dates_from_room_day(room_day_df)]
-    active_dates = [d for d in active_dates if d is not None]
+    active_records = active_room_day_records(room_day_df)
+    active_dates = sorted({r["date"] for r in active_records})
     if not active_dates:
-        return 0, pd.DataFrame(columns=["日付", "種別", "品目", "フロア", "小計", "備考"])
+        return 0, pd.DataFrame(columns=["日付", "種別", "品目", "対象", "小計", "備考"])
 
     rows = []
     total = 0
 
     if use_pocket_wifi:
-        for d in sorted(active_dates):
-            rows.append(
-                {
-                    "日付": d.date(),
-                    "種別": "インターネット",
-                    "品目": "ポケットWi-Fi貸出",
-                    "フロア": "全部屋",
-                    "小計": INTERNET_POCKET_WIFI_PER_DAY,
-                    "備考": "先着順/同時接続目安5台/電波不安定の可能性",
-                }
-            )
+        for d in active_dates:
+            rows.append({"日付": d.date(), "種別": "インターネット", "品目": "ポケットWi-Fi貸出", "対象": "全部屋", "小計": INTERNET_POCKET_WIFI_PER_DAY, "備考": "先着順/同時接続目安5台/電波不安定の可能性"})
             total += INTERNET_POCKET_WIFI_PER_DAY
 
-    floors = infer_active_days_by_floor(room_day_df)
+    selected_by_room_service: Dict[Tuple[str, str], List[pd.Timestamp]] = {}
+    for rec in active_records:
+        date_str = str(rec["date_str"])
+        room = str(rec["room"])
+        service = fixed_network_selections.get((date_str, room), INTERNET_NONE)
+        if service == INTERNET_NONE:
+            continue
+        if service not in available_fixed_network_services(room):
+            continue
+        selected_by_room_service.setdefault((room, service), []).append(rec["date"])
 
-    if use_fixed_line:
-        for floor_label, ds in floors.items():
-            blocks = _split_consecutive_blocks(ds)
-            for b in blocks:
-                if not b:
+    for (room, service), ds in selected_by_room_service.items():
+        blocks = _split_consecutive_blocks(ds)
+        for b in blocks:
+            for idx, d in enumerate(b):
+                is_first_day = idx == 0
+                price = _internet_staged_price(service, is_first_day)
+                if price <= 0:
                     continue
-                rows.append(
-                    {
-                        "日付": b[0].date(),
-                        "種別": "インターネット",
-                        "品目": "常設回線（初日）",
-                        "フロア": floor_label,
-                        "小計": INTERNET_FIXED_FIRST_DAY,
-                        "備考": "連続利用の段階料金",
-                    }
-                )
-                total += INTERNET_FIXED_FIRST_DAY
-                for d in b[1:]:
-                    rows.append(
-                        {
-                            "日付": d.date(),
-                            "種別": "インターネット",
-                            "品目": "常設回線（2日目以降）",
-                            "フロア": floor_label,
-                            "小計": INTERNET_FIXED_AFTER_DAY,
-                            "備考": "連続利用の段階料金",
-                        }
-                    )
-                    total += INTERNET_FIXED_AFTER_DAY
+                rows.append({"日付": d.date(), "種別": "インターネット", "品目": _internet_service_item_name(service, is_first_day), "対象": room, "小計": price, "備考": "連続利用の段階料金"})
+                total += price
 
     if use_temp_line:
+        floors = infer_active_days_by_floor(room_day_df)
         for floor_label, ds in floors.items():
             blocks = _split_consecutive_blocks(ds)
             for b in blocks:
                 if not b:
                     continue
-                rows.append(
-                    {
-                        "日付": b[0].date(),
-                        "種別": "インターネット",
-                        "品目": "仮設回線（開通工事）",
-                        "フロア": floor_label,
-                        "小計": INTERNET_TEMP_LINE_BASE,
-                        "備考": "＋別途お見積り（NTT回線開通工事）",
-                    }
-                )
+                rows.append({"日付": b[0].date(), "種別": "インターネット", "品目": "仮設回線（開通工事）", "対象": floor_label, "小計": INTERNET_TEMP_LINE_BASE, "備考": "＋別途お見積り（NTT回線開通工事）"})
                 total += INTERNET_TEMP_LINE_BASE
 
-    df = pd.DataFrame(rows, columns=["日付", "種別", "品目", "フロア", "小計", "備考"])
+    df = pd.DataFrame(rows, columns=["日付", "種別", "品目", "対象", "小計", "備考"])
     return total, df
-
 # =========================
 # KPI Display
 # =========================
@@ -1765,10 +1789,35 @@ def main():
         st.divider()
 
         st.markdown("### インターネット")
-        use_pocket_wifi = st.checkbox("ポケットWi-Fi（2,800円/日）", value=False)
-        use_fixed_line = st.checkbox("常設回線（初日18,000円、2日目以降2,000円）", value=False)
-        use_temp_line = st.checkbox("仮設回線（5,000円/回 + 別途見積）", value=False)
+        st.markdown("#### 固定ネット設備（有線LAN / Wi-Fi）")
+        fixed_network_selections: Dict[Tuple[str, str], str] = {}
+        fixed_network_rows = [
+            r for r in active_room_day_records(room_day_df)
+            if len(available_fixed_network_services(str(r["room"]))) > 1
+        ]
+        if fixed_network_rows:
+            st.caption("部屋・日ごとに、なし / 有線LAN / Wi-Fi から1つだけ選択します。")
+            for rec in fixed_network_rows:
+                date_str = str(rec["date_str"])
+                room = str(rec["room"])
+                options = available_fixed_network_services(room)
+                key = f"fixed_net_{date_str}_{room}"
+                current = st.session_state.get(key, INTERNET_NONE)
+                if current not in options:
+                    current = INTERNET_NONE
+                choice = st.selectbox(
+                    f"{date_str} / {room}",
+                    options=options,
+                    index=options.index(current),
+                    key=key,
+                )
+                fixed_network_selections[(date_str, room)] = choice
+        else:
+            st.caption("固定ネット設備の対象室（大集会室・中集会室・小集会室・特別室・大会議室）は利用日に含まれていません。")
 
+        st.markdown("#### その他インターネット（既存）")
+        use_pocket_wifi = st.checkbox("ポケットWi-Fi（2,800円/日）", value=False)
+        use_temp_line = st.checkbox("仮設回線（5,000円/回 + 別途見積）", value=False)
         st.divider()
 
         do_calc = st.button("計算する", type="primary")
@@ -1791,8 +1840,8 @@ def main():
 
             internet_total, internet_df = calc_internet_total(
                 room_day_df=room_day_df,
+                fixed_network_selections=fixed_network_selections,
                 use_pocket_wifi=use_pocket_wifi,
-                use_fixed_line=use_fixed_line,
                 use_temp_line=use_temp_line,
             )
 
@@ -1848,7 +1897,7 @@ def main():
                     n = internet_df.copy()
                     n["カテゴリ"] = "インターネット"
                     n = n.rename(columns={"品目": "名称"})
-                    frames.append(n[["日付", "カテゴリ", "名称", "フロア", "小計", "備考"]])
+                    frames.append(n[["日付", "カテゴリ", "名称", "対象", "小計", "備考"]])
 
                 if frames:
                     all_df = pd.concat(frames, ignore_index=True)
