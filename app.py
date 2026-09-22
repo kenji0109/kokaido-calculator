@@ -1796,22 +1796,91 @@ def main():
             if len(available_fixed_network_services(str(r["room"]))) > 1
         ]
         if fixed_network_rows:
-            st.caption("部屋・日ごとに、なし / 有線LAN / Wi-Fi から1つだけ選択します。")
+            fixed_network_dates = sorted({str(r["date_str"]) for r in fixed_network_rows})
+            fixed_network_state_key = "fixed_network_saved_selections"
+            active_fixed_network_keys = {
+                (str(r["date_str"]), str(r["room"])) for r in fixed_network_rows
+            }
+            saved_fixed_network_selections = dict(
+                st.session_state.get(fixed_network_state_key, {})
+            )
+
+            def save_fixed_network_choice(
+                selection_key: Tuple[str, str], widget_key: str
+            ) -> None:
+                saved = dict(st.session_state.get(fixed_network_state_key, {}))
+                saved[selection_key] = st.session_state.get(widget_key, INTERNET_NONE)
+                st.session_state[fixed_network_state_key] = saved
+
+            # 折りたたみ中や、別の日付を表示している間も、全日分の選択を
+            # 永続用の session_state から復元して計算へ渡す。
             for rec in fixed_network_rows:
                 date_str = str(rec["date_str"])
                 room = str(rec["room"])
                 options = available_fixed_network_services(room)
-                key = f"fixed_net_{date_str}_{room}"
-                current = st.session_state.get(key, INTERNET_NONE)
+                selection_key = (date_str, room)
+                legacy_widget_key = f"fixed_net_{date_str}_{room}"
+                current = saved_fixed_network_selections.get(
+                    selection_key,
+                    st.session_state.get(legacy_widget_key, INTERNET_NONE),
+                )
                 if current not in options:
                     current = INTERNET_NONE
-                choice = st.selectbox(
-                    f"{date_str} / {room}",
-                    options=options,
-                    index=options.index(current),
-                    key=key,
-                )
-                fixed_network_selections[(date_str, room)] = choice
+                saved_fixed_network_selections[selection_key] = current
+                fixed_network_selections[selection_key] = current
+
+            # 現在の部屋・日付から外れた古い選択は引き継がない。
+            saved_fixed_network_selections = {
+                key: value
+                for key, value in saved_fixed_network_selections.items()
+                if key in active_fixed_network_keys
+            }
+            st.session_state[fixed_network_state_key] = saved_fixed_network_selections
+
+            configured_count = sum(
+                choice != INTERNET_NONE for choice in fixed_network_selections.values()
+            )
+            expander_label = "固定ネット設備を設定・変更する"
+            if configured_count:
+                expander_label += f"（選択済み {configured_count}件）"
+
+            with st.expander(expander_label, expanded=False):
+                st.caption("部屋・日ごとに、なし / 有線LAN / Wi-Fi から1つだけ選択します。")
+
+                if len(fixed_network_dates) > 1:
+                    display_date_key = "fixed_network_display_date"
+                    if st.session_state.get(display_date_key) not in fixed_network_dates:
+                        st.session_state[display_date_key] = fixed_network_dates[0]
+                    display_date = st.selectbox(
+                        "設定する日付",
+                        options=fixed_network_dates,
+                        key=display_date_key,
+                    )
+                else:
+                    display_date = fixed_network_dates[0]
+
+                rows_for_display = [
+                    rec for rec in fixed_network_rows
+                    if str(rec["date_str"]) == display_date
+                ]
+                for rec in rows_for_display:
+                    date_str = str(rec["date_str"])
+                    room = str(rec["room"])
+                    options = available_fixed_network_services(room)
+                    selection_key = (date_str, room)
+                    key = f"fixed_net_{date_str}_{room}"
+                    current = fixed_network_selections[selection_key]
+                    if st.session_state.get(key) not in options:
+                        st.session_state[key] = current
+                    choice = st.selectbox(
+                        room,
+                        options=options,
+                        index=options.index(current),
+                        key=key,
+                        on_change=save_fixed_network_choice,
+                        args=(selection_key, key),
+                    )
+                    fixed_network_selections[selection_key] = choice
         else:
             st.caption("固定ネット設備の対象室（大集会室・中集会室・小集会室・特別室・大会議室）は利用日に含まれていません。")
 
