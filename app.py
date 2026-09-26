@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 
-import hashlib
 import re
 import pandas as pd
 import streamlit as st
@@ -18,7 +17,8 @@ except Exception:
 # =========================
 # App / Paths
 # =========================
-APP_TITLE = "料金電卓 （部屋×日編集＋設備＋技術者＋インターネット）"
+APP_TITLE = "料金電卓"
+APP_SUBTITLE = "部屋・設備・技術者・インターネットの料金を計算します"
 DATA_DIR = Path(__file__).parent / "data"
 
 PRICES_CSV = DATA_DIR / "prices.csv"
@@ -1324,41 +1324,6 @@ def calc_internet_total(
 # =========================
 # KPI Display
 # =========================
-def make_calc_fingerprint(
-    room_day_df: pd.DataFrame,
-    days_df: pd.DataFrame,
-    default_room_slot: str,
-    group_overrides: Dict[str, str],
-    base_selections: List[Dict],
-    gallery_678: bool,
-    tech_people: int,
-    fixed_network_selections: Dict[Tuple[str, str], str],
-    use_pocket_wifi: bool,
-    use_temp_line: bool,
-) -> str:
-    """計算に使う入力の指紋。前回の計算時から入力が変わったかの判定に使う。"""
-    h = hashlib.sha256()
-    for df in (room_day_df, days_df):
-        if df is None or df.empty:
-            h.update(b"<empty>")
-        else:
-            h.update(df.to_csv(index=False).encode("utf-8"))
-    h.update(
-        repr(
-            (
-                default_room_slot,
-                sorted(group_overrides.items()),
-                sorted((s["group_id"], s["item_id"], int(s["qty"])) for s in base_selections),
-                bool(gallery_678),
-                int(tech_people),
-                sorted(fixed_network_selections.items()),
-                bool(use_pocket_wifi),
-                bool(use_temp_line),
-            )
-        ).encode("utf-8")
-    )
-    return h.hexdigest()
-
 def build_all_details_df(
     room_df: pd.DataFrame,
     equipment_df: pd.DataFrame,
@@ -1393,8 +1358,30 @@ def build_all_details_df(
     if not frames:
         return pd.DataFrame(columns=["日付", "カテゴリ", "名称", "区分", "小計", "備考"])
     out = pd.concat(frames, ignore_index=True)
+    out["日付"] = format_date_column(out["日付"])
     out["小計"] = pd.to_numeric(out["小計"], errors="coerce").round().astype("Int64")
     return out
+
+def format_date_column(col: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(col, errors="coerce")
+    return parsed.dt.strftime(DATE_FMT).where(parsed.notna(), col.astype(str))
+
+MONEY_COLUMNS = ("単価", "小計")
+
+def show_detail_df(df: pd.DataFrame) -> None:
+    """明細の表示用：日付を YYYY/MM/DD、金額を ¥ とカンマ付きで表示する。"""
+    if df is None or df.empty:
+        st.info("明細がありません。")
+        return
+    view = df.copy()
+    if "日付" in view.columns:
+        view["日付"] = format_date_column(view["日付"])
+    column_config = {}
+    for c in MONEY_COLUMNS:
+        if c in view.columns:
+            view[c] = pd.to_numeric(view[c], errors="coerce")
+            column_config[c] = st.column_config.NumberColumn(format="yen")
+    st.dataframe(view, width="stretch", hide_index=True, column_config=column_config)
 
 def build_details_csv(all_df: pd.DataFrame) -> bytes:
     # Excel で文字化けしないよう BOM 付き UTF-8
@@ -1555,10 +1542,12 @@ def inject_ui_css():
 }
 .oai-kpi-row {
   display: grid;
-  grid-template-columns: repeat(5, minmax(160px, 1fr));
+  /* 列の幅に合わせて折り返す（画面幅ではなく配置先の幅で決まる） */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
   margin: 8px 0 8px 0;
 }
+.oai-kpi-row .oai-kpi-card.total { grid-column: 1 / -1; }
 .oai-kpi-card {
   border: 1px solid var(--oai-border);
   border-radius: 12px;
@@ -1590,12 +1579,9 @@ def inject_ui_css():
   text-overflow: ellipsis;
 }
 .oai-kpi-card.total { border-width: 2px; }
-@media (max-width: 1100px) {
-  .oai-kpi-row { grid-template-columns: repeat(3, minmax(160px, 1fr)); }
-}
 @media (max-width: 640px) {
   .oai-grand { font-size: 32px; }
-  .oai-kpi-row { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+  .oai-kpi-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .oai-kpi-val { font-size: 22px; }
 }
 </style>
@@ -1630,11 +1616,11 @@ def render_totals_sticky(room_total: int, equipment_total: int, tech_total: int,
 def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, internet_total: int):
     grand_total = room_total + equipment_total + tech_total + internet_total
     cards = [
-        ("部屋代 合計", yen(room_total), ""),
-        ("設備 合計", yen(equipment_total), ""),
-        ("技術者 合計", yen(tech_total), ""),
-        ("インターネット 合計", yen(internet_total), ""),
-        ("総額", yen(grand_total), "内訳は上部に表示", "total"),
+        ("総額", yen(grand_total), "", "total"),
+        ("部屋", yen(room_total), ""),
+        ("設備", yen(equipment_total), ""),
+        ("技術者", yen(tech_total), ""),
+        ("インターネット", yen(internet_total), ""),
     ]
 
     html = ['<div class="oai-kpi-row">']
@@ -1663,6 +1649,7 @@ def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, in
 def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
+    st.caption(APP_SUBTITLE)
 
     inject_ui_css()
 
@@ -1690,7 +1677,7 @@ def main():
     left, right = st.columns([1, 1.35], gap="large")
 
     with left:
-        st.subheader("1) 期間・部屋（部屋×日テーブル編集）")
+        st.subheader("期間・部屋")
 
         today = pd.Timestamp.today().date()
         if st.session_state.get("start_date") is None:
@@ -1764,6 +1751,7 @@ def main():
             room_options,
             key="rooms_selected",
             on_change=on_rooms_selected_change,
+            placeholder="選択してください",
             select_all=False,
         )
         st.session_state["rooms_selected_prev"] = list(rooms_selected)
@@ -1789,8 +1777,6 @@ def main():
         is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
 
         st.divider()
-        st.subheader("日別設定（設備・技術者・インターネットに使用）")
-        st.caption("部屋料金は「部屋×日テーブル」の内容が計算の根拠になります。")
 
         days_key = f"days_{start_date}_{end_date}"
         new_defaults = {
@@ -1818,10 +1804,16 @@ def main():
                 st.session_state[days_key] = sync_days_df_defaults(df_existing, old_defaults, new_defaults)
                 st.session_state[days_key + "_defaults"] = dict(new_defaults)
 
+        days_expander = st.expander("日別設定（設備・技術者の区分、割増利用）", expanded=False)
+        days_expander.caption(
+            "設備・技術者・インターネットの計算に使います。部屋料金は下の「部屋×日テーブル」で調整してください。"
+        )
         try:
-            edited_days = st.data_editor(
+            edited_days = days_expander.data_editor(
                 st.session_state[days_key],
                 width="stretch",
+                hide_index=True,
+                column_order=["日付", "割増利用", "設備デフォ区分", "技術者区分", "土日祝", "祝日名", "休館日"],
                 num_rows="fixed",
                 column_config={
                     "日付": st.column_config.TextColumn(disabled=True),
@@ -1840,7 +1832,7 @@ def main():
         except Exception:
             st.warning("この環境では日別編集UIが利用できないため、日別設定は表示のみになります。")
             edited_days = st.session_state[days_key]
-            st.dataframe(edited_days, width="stretch")
+            days_expander.dataframe(edited_days, width="stretch", hide_index=True)
 
         if not edited_days.empty and bool(edited_days["休館日"].any()):
             closed_list = edited_days.loc[edited_days["休館日"] == True, "日付"].astype(str).tolist()
@@ -1850,7 +1842,7 @@ def main():
             st.error(f"休館日があります：{msg}{suffix}")
 
         st.divider()
-        st.subheader("部屋×日 テーブル（個別調整）")
+        st.subheader("部屋×日テーブル（日ごと・部屋ごとの調整）")
         st.caption("表の編集はすぐに計算へ反映されます。")
 
         room_day_key = f"room_day_{start_date}_{end_date}"
@@ -1868,12 +1860,16 @@ def main():
                 default_room_extension,
             )
 
-        st.markdown("### フィルター")
+        st.markdown("#### 絞り込み")
         f1, f2 = st.columns([1, 1])
         all_dates = sorted(st.session_state[room_day_key]["日付"].unique().tolist()) if not st.session_state[room_day_key].empty else []
-        date_filter = f1.multiselect("日付（未選択＝全日）", options=all_dates, default=[], key=f"filter_dates_{room_day_key}")
+        date_filter = f1.multiselect(
+            "日付（未選択＝全日）", options=all_dates, default=[], key=f"filter_dates_{room_day_key}", placeholder="すべての日付"
+        )
         all_rooms_in_table = sorted(st.session_state[room_day_key]["部屋"].unique().tolist()) if not st.session_state[room_day_key].empty else []
-        room_filter = f2.multiselect("部屋（未選択＝全部屋）", options=all_rooms_in_table, default=[], key=f"filter_rooms_{room_day_key}")
+        room_filter = f2.multiselect(
+            "部屋（未選択＝全部屋）", options=all_rooms_in_table, default=[], key=f"filter_rooms_{room_day_key}", placeholder="すべての部屋"
+        )
 
         view_df = st.session_state[room_day_key].copy()
         if date_filter:
@@ -1912,6 +1908,8 @@ def main():
                 key=editor_key,
                 on_change=on_room_day_edit,
                 width="stretch",
+                hide_index=True,
+                column_order=["日付", "部屋", "区分", "延長", "割増利用", "土日祝", "祝日名", "休館日"],
                 num_rows="fixed",
                 column_config={
                     "日付": st.column_config.TextColumn(disabled=True),
@@ -1929,10 +1927,10 @@ def main():
             )
         except Exception:
             st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
-            st.dataframe(view_df, width="stretch")
+            st.dataframe(view_df, width="stretch", hide_index=True)
 
     with right:
-        st.subheader("2) 設備・技術者・インターネット（入力）")
+        st.subheader("設備・技術者・インターネット")
 
         room_day_df = st.session_state.get(room_day_key, pd.DataFrame())
         if room_day_df is None:
@@ -2217,35 +2215,15 @@ def main():
         else:
             st.caption("固定ネット設備の対象室（大集会室・中集会室・小集会室・特別室・大会議室）は利用日に含まれていません。")
 
-        st.markdown("#### その他インターネット（既存）")
+        st.markdown("#### その他インターネット")
         use_pocket_wifi = st.checkbox("ポケットWi-Fi（2,800円/日）", value=False)
         use_temp_line = st.checkbox("仮設回線（5,000円/回 + 別途見積）", value=False)
         st.divider()
 
-        calc_fingerprint = make_calc_fingerprint(
-            room_day_df=room_day_df,
-            days_df=edited_days,
-            default_room_slot=default_room_slot,
-            group_overrides=group_overrides,
-            base_selections=base_selections,
-            gallery_678=gallery_678,
-            tech_people=int(tech_people),
-            fixed_network_selections=fixed_network_selections,
-            use_pocket_wifi=use_pocket_wifi,
-            use_temp_line=use_temp_line,
-        )
-
-        do_calc = st.button("計算する", type="primary", disabled=not selected_rooms)
-
-        last_totals = st.session_state.get("last_totals")
-        if not do_calc and last_totals:
-            if last_totals.get("fingerprint") == calc_fingerprint:
-                with sticky_slot.container():
-                    render_totals_sticky(last_totals["room"], last_totals["equip"], last_totals["tech"], last_totals["net"])
-            else:
-                sticky_slot.warning("入力が変更されています。「計算する」を押して再計算してください。")
-
-        if do_calc:
+        st.subheader("結果")
+        if not selected_rooms:
+            st.info("部屋を選択すると、料金が自動で計算されます。")
+        else:
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
 
             equipment_total, equipment_df = calc_equipment_total_all_days(
@@ -2267,16 +2245,6 @@ def main():
                 use_pocket_wifi=use_pocket_wifi,
                 use_temp_line=use_temp_line,
             )
-
-            st.subheader("結果")
-
-            st.session_state["last_totals"] = {
-                "room": room_total,
-                "equip": equipment_total,
-                "tech": tech_total,
-                "net": internet_total,
-                "fingerprint": calc_fingerprint,
-            }
 
             with sticky_slot.container():
                 render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
@@ -2342,22 +2310,19 @@ def main():
             )
 
             with tab_rooms:
-                st.dataframe(room_df, width="stretch")
+                show_detail_df(room_df)
 
             with tab_eq:
-                st.dataframe(equipment_df, width="stretch")
+                show_detail_df(equipment_df)
 
             with tab_tech:
-                st.dataframe(tech_df, width="stretch")
+                show_detail_df(tech_df)
 
             with tab_net:
-                st.dataframe(internet_df, width="stretch")
+                show_detail_df(internet_df)
 
             with tab_all:
-                if not all_df.empty:
-                    st.dataframe(all_df, width="stretch")
-                else:
-                    st.info("明細がありません（部屋×日が全て「利用なし」など）。")
+                show_detail_df(all_df)
 
 if __name__ == "__main__":
     main()
