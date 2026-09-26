@@ -40,6 +40,9 @@ ROOM_SLOTS_WITH_NONE = ["利用なし"] + ROOM_BASE_SLOTS
 
 ROOM_EXTENSION_SLOTS = ["なし", "前延長30分", "後延長30分", "前後延長30分"]
 
+# 「全館」を選択したときは他の部屋の選択を外す
+ALL_BUILDING_ROOM = "全館"
+
 # 21:30終了の区分（後延長できない）
 ROOM_SLOTS_ENDING_2130 = {"夜間", "午後-夜間", "全日"}
 ROOM_EXTENSIONS_AFTER = {"後延長30分", "前後延長30分"}
@@ -1539,7 +1542,21 @@ def main():
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
 
-        rooms_selected = st.multiselect("部屋（複数選択可 / 未選択＝全部屋）", room_candidates, default=[])
+        def on_rooms_selected_change():
+            # 「全館」を新たに選択したときは、他の部屋の選択を外す
+            cur = list(st.session_state.get("rooms_selected", []))
+            prev = set(st.session_state.get("rooms_selected_prev", []))
+            if ALL_BUILDING_ROOM in cur and ALL_BUILDING_ROOM not in prev:
+                st.session_state["rooms_selected"] = [ALL_BUILDING_ROOM]
+
+        rooms_selected = st.multiselect(
+            "部屋（複数選択可 / 未選択＝全部屋）",
+            room_candidates,
+            default=[],
+            key="rooms_selected",
+            on_change=on_rooms_selected_change,
+        )
+        st.session_state["rooms_selected_prev"] = list(rooms_selected)
         selected_rooms = rooms_selected if rooms_selected else room_candidates
 
         default_room_slot = st.selectbox(
