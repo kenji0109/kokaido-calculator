@@ -12,6 +12,10 @@ tv,common,テレビ,台,500,0,,,1,0
 dvd,common,ビデオデッキ/DVDデッキ,台,500,0,,（再生のみ）,1,0
 podium,common,司会台（演台）,台,500,0,,,1,0
 flower_stand,common,花台,台,500,0,,,1,0
+screen_confbig,common,スクリーン（大会議室）,台,1000,0,,,1,0
+projector_confbig,common,プロジェクター（大会議室）,台,2000,0,,,1,0
+screen_hallsmall,common,スクリーン（小集会室）,台,1000,0,,,1,0
+projector_west2f,common,プロジェクター（西2階備品庫）,台,2000,0,,,1,0
 power_1kw,power,電源使用料,kw,300,0,,（1kw毎）,1,1
 pa_a,hall_big_sound,拡声装置A,式,7000,0,,マイク1本（有線/ワイヤレスのいずれか）・スタンド付,1,0
 wireless_a,hall_big_sound,ワイヤレスマイクA,台,2000,0,pa_a,（拡声装置A 別途必要）,1,0
