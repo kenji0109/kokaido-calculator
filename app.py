@@ -1541,6 +1541,9 @@ def main():
             st.stop()
 
         room_candidates = sorted(prices_df["room"].unique().tolist())
+        # 「全館」を先頭に置き、組み込みの「Select all」の代わりに使う
+        if ALL_BUILDING_ROOM in room_candidates:
+            room_candidates = [ALL_BUILDING_ROOM] + [r for r in room_candidates if r != ALL_BUILDING_ROOM]
 
         def on_rooms_selected_change():
             # 「全館」を新たに選択したときは、他の部屋の選択を外す
@@ -1549,12 +1552,16 @@ def main():
             if ALL_BUILDING_ROOM in cur and ALL_BUILDING_ROOM not in prev:
                 st.session_state["rooms_selected"] = [ALL_BUILDING_ROOM]
 
+        # 「全館」選択中は、各部屋を選択肢に出さない
+        all_building_selected = ALL_BUILDING_ROOM in st.session_state.get("rooms_selected", [])
+        room_options = [ALL_BUILDING_ROOM] if all_building_selected else room_candidates
+
         rooms_selected = st.multiselect(
             "部屋（複数選択可 / 未選択＝全部屋）",
-            room_candidates,
-            default=[],
+            room_options,
             key="rooms_selected",
             on_change=on_rooms_selected_change,
+            select_all=False,
         )
         st.session_state["rooms_selected_prev"] = list(rooms_selected)
         selected_rooms = rooms_selected if rooms_selected else room_candidates
