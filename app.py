@@ -1513,25 +1513,40 @@ def main():
     with left:
         st.subheader("1) 期間・部屋（部屋×日テーブル編集）")
 
+        today = pd.Timestamp.today().date()
+        if st.session_state.get("start_date") is None:
+            st.session_state["start_date"] = today
+        if st.session_state.get("end_date") is None:
+            st.session_state["end_date"] = st.session_state["start_date"]
+        st.session_state.setdefault("start_date_prev", st.session_state["start_date"])
+
+        def on_start_date_change():
+            # 終了日が開始日と同じ（1日利用）か開始日より前なら、終了日を開始日に合わせる
+            new_start = st.session_state.get("start_date")
+            prev_start = st.session_state.get("start_date_prev")
+            end = st.session_state.get("end_date")
+            if new_start is not None and (end is None or end == prev_start or end < new_start):
+                st.session_state["end_date"] = new_start
+            st.session_state["start_date_prev"] = new_start
+
         col_a, col_b = st.columns(2)
         with col_a:
             start_date = st.date_input(
                 "開始日",
-                value=pd.Timestamp.today().date(),
                 key="start_date",
+                on_change=on_start_date_change,
             )
         with col_b:
             end_date = st.date_input(
-                "終了日",
-                value=pd.Timestamp.today().date(),
+                "終了日（1日のみの場合は入力不要）",
                 key="end_date",
             )
 
-        # 追加: Noneガード（初回レンダリング時に未選択の場合の対策）
+        # Noneガード（未選択の場合の対策）
         if start_date is None:
-            start_date = pd.Timestamp.today().date()
+            start_date = today
         if end_date is None:
-            end_date = pd.Timestamp.today().date()
+            end_date = start_date
 
         start_ts = pd.Timestamp(start_date)
         end_ts = pd.Timestamp(end_date)
