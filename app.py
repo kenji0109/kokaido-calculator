@@ -40,6 +40,12 @@ ROOM_SLOTS_WITH_NONE = ["利用なし"] + ROOM_BASE_SLOTS
 
 ROOM_EXTENSION_SLOTS = ["なし", "前延長30分", "後延長30分", "前後延長30分"]
 
+# 21:30終了の区分（後延長できない）
+ROOM_SLOTS_ENDING_2130 = {"夜間", "午後-夜間", "全日"}
+ROOM_EXTENSIONS_AFTER = {"後延長30分", "前後延長30分"}
+ROOM_EXTENSION_SLOTS_2130 = [x for x in ROOM_EXTENSION_SLOTS if x not in ROOM_EXTENSIONS_AFTER]
+INVALID_AFTER_EXTENSION_NOTE = "21:30終了の区分は後延長できません（延長分を計算から除外）"
+
 EQUIPMENT_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 TECH_TIME_SLOTS = ["利用なし"] + TIME_SLOTS
 
@@ -386,6 +392,9 @@ def _fix_room_extension(v: object) -> str:
         return "なし"
     return s
 
+def is_invalid_after_extension(slot: str, ext: str) -> bool:
+    return normalize_str(slot) in ROOM_SLOTS_ENDING_2130 and _fix_room_extension(ext) in ROOM_EXTENSIONS_AFTER
+
 def _fix_tech_slot(v: object) -> str:
     s = normalize_str(v)
     if s == "" or s.lower() == "none":
@@ -728,7 +737,12 @@ def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
         m[normalize_str(r["日付"])] = bool(r.get("割増利用", False))
     return m
 
-def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], default_room_slot: str) -> pd.DataFrame:
+def build_room_day_base(
+    days_df: pd.DataFrame,
+    selected_rooms: List[str],
+    default_room_slot: str,
+    default_room_extension: str = "なし",
+) -> pd.DataFrame:
     rows = []
     day_business = _day_business_map(days_df)
 
@@ -746,7 +760,7 @@ def build_room_day_base(days_df: pd.DataFrame, selected_rooms: List[str], defaul
                     "休館日": bool(drow.get("休館日", False)),
                     "部屋": room,
                     "区分": default_room_slot,
-                    "延長": "なし",
+                    "延長": _fix_room_extension(default_room_extension),
                     "割増利用": bool(day_business.get(date_str, False)),
                     "手動区分": False,
                     "手動延長": False,
@@ -765,8 +779,9 @@ def merge_room_day(
     days_df: pd.DataFrame,
     selected_rooms: List[str],
     default_room_slot: str,
+    default_room_extension: str = "なし",
 ) -> pd.DataFrame:
-    base = build_room_day_base(days_df, selected_rooms, default_room_slot)
+    base = build_room_day_base(days_df, selected_rooms, default_room_slot, default_room_extension)
     if current is None or current.empty:
         return base
 
@@ -963,7 +978,20 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
                 }
             )
 
-        if ext != "なし":
+        if ext != "なし" and is_invalid_after_extension(slot, ext):
+            rows.append(
+                {
+                    "日付": dts.date(),
+                    "種別": "部屋",
+                    "品目": f"{room}（延長）",
+                    "区分": ext,
+                    "割増": is_business,
+                    "単価": None,
+                    "小計": None,
+                    "備考": INVALID_AFTER_EXTENSION_NOTE,
+                }
+            )
+        elif ext != "なし":
             pricing_slot, mult, note = extension_to_pricing(ext, slots_in_prices)
 
             m2 = (
@@ -1005,6 +1033,28 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
 
     df = pd.DataFrame(rows)
     return total, df
+
+def invalid_after_extension_rows(room_day_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["日付", "部屋", "区分", "延長"]
+    if room_day_df is None or room_day_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for _, r in room_day_df.iterrows():
+        if bool(r.get("休館日", False)):
+            continue
+        slot = normalize_str(r.get("区分", ""))
+        ext = _fix_room_extension(r.get("延長", "なし"))
+        if is_invalid_after_extension(slot, ext):
+            rows.append(
+                {
+                    "日付": normalize_str(r.get("日付", "")),
+                    "部屋": normalize_str(r.get("部屋", "")),
+                    "区分": slot,
+                    "延長": ext,
+                }
+            )
+    return pd.DataFrame(rows, columns=cols)
 
 # =========================
 # 計算用：日ごとの使用部屋を集計
@@ -1498,6 +1548,15 @@ def main():
             index=ROOM_SLOTS_WITH_NONE.index("全日") if "全日" in ROOM_SLOTS_WITH_NONE else 0,
         )
 
+        extension_options = (
+            ROOM_EXTENSION_SLOTS_2130 if default_room_slot in ROOM_SLOTS_ENDING_2130 else ROOM_EXTENSION_SLOTS
+        )
+        default_room_extension = st.selectbox(
+            "部屋の延長（新規追加の初期値）",
+            extension_options,
+            index=extension_options.index("なし"),
+        )
+
         is_business_default = st.checkbox("割増利用（デフォルト）", value=False)
 
         st.divider()
@@ -1568,13 +1627,16 @@ def main():
         room_day_key = f"room_day_{start_date}_{end_date}"
 
         if room_day_key not in st.session_state:
-            st.session_state[room_day_key] = build_room_day_base(edited_days, list(selected_rooms), default_room_slot)
+            st.session_state[room_day_key] = build_room_day_base(
+                edited_days, list(selected_rooms), default_room_slot, default_room_extension
+            )
         else:
             st.session_state[room_day_key] = merge_room_day(
                 st.session_state[room_day_key],
                 edited_days,
                 list(selected_rooms),
                 default_room_slot,
+                default_room_extension,
             )
 
         st.markdown("### フィルター")
@@ -1632,7 +1694,8 @@ def main():
         rooms_by_day = rooms_used_by_date(room_day_df)
 
         has_d_days_raw = any(bool(MIC_D_ROOMS.issubset(rs)) for rs in rooms_by_day.values())
-        if has_d_days_raw:
+        d_rooms_explicitly_selected = MIC_D_ROOMS.issubset(set(rooms_selected))
+        if d_rooms_explicitly_selected and has_d_days_raw:
             gallery_678 = st.checkbox(
                 "（第6〜8会議室）ギャラリー利用",
                 value=bool(st.session_state.get("gallery_678", False)),
@@ -1931,6 +1994,17 @@ def main():
             )
 
             with tab_rooms:
+                invalid_ext_df = invalid_after_extension_rows(room_day_df)
+                if not invalid_ext_df.empty:
+                    lines = [
+                        f"- {r['日付']} / {r['部屋']} / {r['区分']} / {r['延長']}"
+                        for _, r in invalid_ext_df.iterrows()
+                    ]
+                    st.error(
+                        "21:30終了の区分（夜間・午後-夜間・全日）は後延長できません。"
+                        "次の行の延長分は計算から除外しています（日付 / 部屋 / 区分 / 延長）：\n"
+                        + "\n".join(lines)
+                    )
                 st.dataframe(room_df, use_container_width=True)
 
             with tab_eq:
