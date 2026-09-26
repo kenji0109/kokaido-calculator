@@ -1,4 +1,4 @@
 streamlit==1.64.0
-pandas
-jpholiday
-reportlab
+pandas>=2.2,<4
+jpholiday>=1.0,<2
+reportlab>=4.0,<6
