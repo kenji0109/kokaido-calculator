@@ -1358,24 +1358,43 @@ def build_all_details_df(
     if not frames:
         return pd.DataFrame(columns=["日付", "カテゴリ", "名称", "区分", "小計", "備考"])
     out = pd.concat(frames, ignore_index=True)
-    out["日付"] = format_date_column(out["日付"])
+    out = add_date_labels(out)
     out["小計"] = pd.to_numeric(out["小計"], errors="coerce").round().astype("Int64")
     return out
 
-def format_date_column(col: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(col, errors="coerce")
-    return parsed.dt.strftime(DATE_FMT).where(parsed.notna(), col.astype(str))
+WEEKDAYS_JA = "月火水木金土日"
+
+def format_date_label(v: object) -> str:
+    """日付を「2026/11/23（月）」の形にする。日付として読めない値はそのまま返す。"""
+    ts = pd.to_datetime(v, errors="coerce")
+    if pd.isna(ts):
+        return "" if v is None else str(v)
+    return f"{ts.strftime(DATE_FMT)}（{WEEKDAYS_JA[ts.weekday()]}）"
+
+def holiday_label(v: object) -> str:
+    ts = pd.to_datetime(v, errors="coerce")
+    if pd.isna(ts):
+        return ""
+    return holiday_name(ts)
+
+def add_date_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """明細の「日付」に曜日を付け、その右に「祝日」列を追加する（何度呼んでも同じ結果）。"""
+    if df is None or df.empty or "日付" not in df.columns or "祝日" in df.columns:
+        return df
+    out = df.copy()
+    raw = out["日付"]
+    out["日付"] = raw.map(format_date_label)
+    out.insert(out.columns.get_loc("日付") + 1, "祝日", raw.map(holiday_label))
+    return out
 
 MONEY_COLUMNS = ("単価", "小計")
 
 def show_detail_df(df: pd.DataFrame) -> None:
-    """明細の表示用：日付を YYYY/MM/DD、金額を ¥ とカンマ付きで表示する。"""
+    """明細の表示用：日付に曜日と祝日を付け、金額を ¥ とカンマ付きで表示する。"""
     if df is None or df.empty:
         st.info("明細がありません。")
         return
-    view = df.copy()
-    if "日付" in view.columns:
-        view["日付"] = format_date_column(view["日付"])
+    view = add_date_labels(df)
     column_config = {}
     for c in MONEY_COLUMNS:
         if c in view.columns:
@@ -1453,9 +1472,9 @@ def build_estimate_pdf(
     )
     story += [tt, Spacer(1, 6 * mm), Paragraph("明細", body), Spacer(1, 2 * mm)]
 
-    detail_cols = ["日付", "カテゴリ", "名称", "区分", "対象", "小計", "備考"]
+    detail_cols = ["日付", "祝日", "カテゴリ", "名称", "区分", "対象", "小計", "備考"]
     cols = [c for c in detail_cols if c in all_df.columns]
-    widths = {"日付": 20, "カテゴリ": 20, "名称": 44, "区分": 20, "対象": 20, "小計": 20, "備考": 42}
+    widths = {"日付": 31, "祝日": 24, "カテゴリ": 18, "名称": 38, "区分": 18, "対象": 20, "小計": 20, "備考": 34}
     rows = [cols]
     for _, r in all_df.iterrows():
         row = []
