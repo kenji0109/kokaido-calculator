@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
 
+import hashlib
 import re
 import pandas as pd
 import streamlit as st
@@ -740,6 +741,10 @@ def _day_business_map(days_df: pd.DataFrame) -> Dict[str, bool]:
         m[normalize_str(r["日付"])] = bool(r.get("割増利用", False))
     return m
 
+ROOM_DAY_COLUMNS = [
+    "日付", "土日祝", "祝日名", "休館日", "部屋", "区分", "延長", "割増利用", "手動区分", "手動延長", "手動割増",
+]
+
 def build_room_day_base(
     days_df: pd.DataFrame,
     selected_rooms: List[str],
@@ -770,7 +775,7 @@ def build_room_day_base(
                     "手動割増": False,
                 }
             )
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=ROOM_DAY_COLUMNS)
     if not df.empty:
         df["区分"] = df["区分"].apply(lambda x: _fix_room_slot(x, default_room_slot))
         df["延長"] = df["延長"].apply(_fix_room_extension)
@@ -1317,6 +1322,41 @@ def calc_internet_total(
 # =========================
 # KPI Display
 # =========================
+def make_calc_fingerprint(
+    room_day_df: pd.DataFrame,
+    days_df: pd.DataFrame,
+    default_room_slot: str,
+    group_overrides: Dict[str, str],
+    base_selections: List[Dict],
+    gallery_678: bool,
+    tech_people: int,
+    fixed_network_selections: Dict[Tuple[str, str], str],
+    use_pocket_wifi: bool,
+    use_temp_line: bool,
+) -> str:
+    """計算に使う入力の指紋。前回の計算時から入力が変わったかの判定に使う。"""
+    h = hashlib.sha256()
+    for df in (room_day_df, days_df):
+        if df is None or df.empty:
+            h.update(b"<empty>")
+        else:
+            h.update(df.to_csv(index=False).encode("utf-8"))
+    h.update(
+        repr(
+            (
+                default_room_slot,
+                sorted(group_overrides.items()),
+                sorted((s["group_id"], s["item_id"], int(s["qty"])) for s in base_selections),
+                bool(gallery_678),
+                int(tech_people),
+                sorted(fixed_network_selections.items()),
+                bool(use_pocket_wifi),
+                bool(use_temp_line),
+            )
+        ).encode("utf-8")
+    )
+    return h.hexdigest()
+
 def yen(x: int) -> str:
     try:
         return f"¥{int(x):,}"
@@ -1486,9 +1526,8 @@ def main():
 
     inject_ui_css()
 
-    if "last_totals" in st.session_state:
-        tt = st.session_state["last_totals"]
-        render_totals_sticky(tt["room"], tt["equip"], tt["tech"], tt["net"])
+    # 上部の合計は、入力が確定した後（計算ボタンの直前）に描画する
+    sticky_slot = st.empty()
 
     try:
         groups_df, items, group_meta = load_equipment_data()
@@ -1572,14 +1611,16 @@ def main():
         room_options = [ALL_BUILDING_ROOM] if all_building_selected else room_candidates
 
         rooms_selected = st.multiselect(
-            "部屋（複数選択可 / 未選択＝全部屋）",
+            "部屋（複数選択可）",
             room_options,
             key="rooms_selected",
             on_change=on_rooms_selected_change,
             select_all=False,
         )
         st.session_state["rooms_selected_prev"] = list(rooms_selected)
-        selected_rooms = rooms_selected if rooms_selected else room_candidates
+        selected_rooms = list(rooms_selected)
+        if not selected_rooms:
+            st.warning("部屋を選択してください（未選択のままでは計算できません）。")
 
         default_room_slot = st.selectbox(
             "部屋の区分（新規追加の初期値）",
@@ -1661,7 +1702,7 @@ def main():
 
         st.divider()
         st.subheader("部屋×日 テーブル（個別調整）")
-        st.caption("表を編集した場合は「この表の変更を反映（確定）」を押してから計算してください。")
+        st.caption("表の編集はすぐに計算へ反映されます。")
 
         room_day_key = f"room_day_{start_date}_{end_date}"
 
@@ -1692,33 +1733,51 @@ def main():
             view_df = view_df[view_df["部屋"].isin(room_filter)]
         view_df = view_df.reset_index(drop=True)
 
+        # 編集は on_change で即座に全体テーブルへ反映する。
+        # 反映後はエディタの key を更新し、行番号ベースの編集差分を持ち越さない。
+        editor_ver_key = f"{room_day_key}_editor_ver"
+        editor_key = f"{room_day_key}_editor_{st.session_state.get(editor_ver_key, 0)}"
+        st.session_state[f"{room_day_key}_view"] = view_df
+
+        def on_room_day_edit():
+            state = st.session_state.get(editor_key, {})
+            edited_rows = state.get("edited_rows", {}) if isinstance(state, dict) else {}
+            if not edited_rows:
+                return
+            view = st.session_state[f"{room_day_key}_view"].copy()
+            for idx, changes in edited_rows.items():
+                i = int(idx)
+                if i < 0 or i >= len(view):
+                    continue
+                for col, val in changes.items():
+                    if col in view.columns:
+                        view.at[i, col] = val
+            st.session_state[room_day_key] = apply_room_day_edits(
+                st.session_state[room_day_key], view, default_room_slot
+            )
+            st.session_state[editor_ver_key] = st.session_state.get(editor_ver_key, 0) + 1
+
         try:
-            with st.form("room_day_form", clear_on_submit=False):
-                edited_room_day_tmp = st.data_editor(
-                    view_df,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    column_config={
-                        "日付": st.column_config.TextColumn(disabled=True),
-                        "土日祝": st.column_config.TextColumn(disabled=True),
-                        "祝日名": st.column_config.TextColumn(disabled=True),
-                        "休館日": st.column_config.CheckboxColumn(disabled=True),
-                        "部屋": st.column_config.TextColumn(disabled=True),
-                        "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
-                        "延長": st.column_config.SelectboxColumn(options=ROOM_EXTENSION_SLOTS),
-                        "割増利用": st.column_config.CheckboxColumn(),
-                        "手動区分": st.column_config.CheckboxColumn(disabled=True),
-                        "手動延長": st.column_config.CheckboxColumn(disabled=True),
-                        "手動割増": st.column_config.CheckboxColumn(disabled=True),
-                    },
-                )
-                submitted = st.form_submit_button("この表の変更を反映（確定）")
-
-            if submitted:
-                updated_full = apply_room_day_edits(st.session_state[room_day_key], edited_room_day_tmp, default_room_slot)
-                st.session_state[room_day_key] = updated_full
-                st.success("反映しました。続けて「計算する」を押してください。")
-
+            st.data_editor(
+                view_df,
+                key=editor_key,
+                on_change=on_room_day_edit,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "日付": st.column_config.TextColumn(disabled=True),
+                    "土日祝": st.column_config.TextColumn(disabled=True),
+                    "祝日名": st.column_config.TextColumn(disabled=True),
+                    "休館日": st.column_config.CheckboxColumn(disabled=True),
+                    "部屋": st.column_config.TextColumn(disabled=True),
+                    "区分": st.column_config.SelectboxColumn(options=ROOM_SLOTS_WITH_NONE),
+                    "延長": st.column_config.SelectboxColumn(options=ROOM_EXTENSION_SLOTS),
+                    "割増利用": st.column_config.CheckboxColumn(),
+                    "手動区分": st.column_config.CheckboxColumn(disabled=True),
+                    "手動延長": st.column_config.CheckboxColumn(disabled=True),
+                    "手動割増": st.column_config.CheckboxColumn(disabled=True),
+                },
+            )
         except Exception:
             st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
             st.dataframe(view_df, use_container_width=True)
@@ -1991,7 +2050,28 @@ def main():
         use_temp_line = st.checkbox("仮設回線（5,000円/回 + 別途見積）", value=False)
         st.divider()
 
-        do_calc = st.button("計算する", type="primary")
+        calc_fingerprint = make_calc_fingerprint(
+            room_day_df=room_day_df,
+            days_df=edited_days,
+            default_room_slot=default_room_slot,
+            group_overrides=group_overrides,
+            base_selections=base_selections,
+            gallery_678=gallery_678,
+            tech_people=int(tech_people),
+            fixed_network_selections=fixed_network_selections,
+            use_pocket_wifi=use_pocket_wifi,
+            use_temp_line=use_temp_line,
+        )
+
+        do_calc = st.button("計算する", type="primary", disabled=not selected_rooms)
+
+        last_totals = st.session_state.get("last_totals")
+        if not do_calc and last_totals:
+            if last_totals.get("fingerprint") == calc_fingerprint:
+                with sticky_slot.container():
+                    render_totals_sticky(last_totals["room"], last_totals["equip"], last_totals["tech"], last_totals["net"])
+            else:
+                sticky_slot.warning("入力が変更されています。「計算する」を押して再計算してください。")
 
         if do_calc:
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
@@ -2023,9 +2103,11 @@ def main():
                 "equip": equipment_total,
                 "tech": tech_total,
                 "net": internet_total,
+                "fingerprint": calc_fingerprint,
             }
 
-            render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
+            with sticky_slot.container():
+                render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
             render_kpis_cards(room_total, equipment_total, tech_total, internet_total)
 
             tab_all, tab_rooms, tab_eq, tab_tech, tab_net = st.tabs(
