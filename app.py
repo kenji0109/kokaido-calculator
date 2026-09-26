@@ -75,6 +75,8 @@ STAND_ITEMS = {MIC_STAND_ID}
 
 MIC_RELATED_ITEM_IDS = {MIC_WIRED_ID, MIC_WIRELESS_ID, PA_C_ID, PA_D_ID}
 
+EQUIPMENT_QTY_STORE_KEY = "equipment_qty_store"
+
 # =========================
 # Utility
 # =========================
@@ -1732,6 +1734,15 @@ def main():
             st.error("日付範囲が不正です（終了日が開始日より前です）。")
             st.stop()
 
+        if closed_days:
+            closed_min, closed_max = min(closed_days), max(closed_days)
+            if days[0].date() < closed_min or days[-1].date() > closed_max:
+                st.warning(
+                    "休館日データが登録されていない期間を含みます"
+                    f"（登録済み：{closed_min.strftime(DATE_FMT)}〜{closed_max.strftime(DATE_FMT)}）。"
+                    "休館日の判定ができないため、ご注意ください。"
+                )
+
         room_candidates = sorted(prices_df["room"].unique().tolist())
         # 「全館」を先頭に置き、組み込みの「Select all」の代わりに使う
         if ALL_BUILDING_ROOM in room_candidates:
@@ -1994,6 +2005,11 @@ def main():
                 return f" / 補足:{n}"
             return ""
 
+        # 数量は入力欄とは別に保持する（検索で非表示・部屋の切替で対象外になっても消さない）
+        qty_store: Dict[str, int] = st.session_state.setdefault(EQUIPMENT_QTY_STORE_KEY, {})
+        if q:
+            st.caption("検索で表示されていない備品の数量も、そのまま計算に含まれます。")
+
         for gid in group_order:
             meta = group_meta.get(gid)
             if not meta:
@@ -2030,24 +2046,42 @@ def main():
                     label = f"{it.item_name}（対象:{target_rooms} / 単位:{it.unit} / {price_str}{_supplement_label(it.notes)}）"
                     help_txt = it.notes if it.notes else None
 
+                    if qty_key not in st.session_state:
+                        st.session_state[qty_key] = int(qty_store.get(it.item_id, 0) or 0)
                     qty = st.number_input(
                         label,
                         min_value=0,
-                        value=int(st.session_state.get(qty_key, 0) or 0),
                         step=1,
                         key=qty_key,
                         help=help_txt,
                     )
+                    qty_store[it.item_id] = int(qty or 0)
 
-                    if int(qty) > 0:
-                        base_selections.append(
-                            {
-                                "group_id": it.group_id,
-                                "item_id": it.item_id,
-                                "qty": int(qty),
-                                "auto_added": False,
-                            }
-                        )
+        excluded_items: List[str] = []
+        for gid in group_order:
+            meta = group_meta.get(gid)
+            if not meta:
+                continue
+            for it in sorted(items_by_group.get(gid, []), key=lambda x: x.item_name):
+                qty = int(qty_store.get(it.item_id, 0) or 0)
+                if qty <= 0:
+                    continue
+                if not group_applies(meta):
+                    excluded_items.append(f"{it.item_name}×{qty}")
+                    continue
+                base_selections.append(
+                    {
+                        "group_id": it.group_id,
+                        "item_id": it.item_id,
+                        "qty": qty,
+                        "auto_added": False,
+                    }
+                )
+        if excluded_items:
+            st.info(
+                "選択中の部屋では対象外のため、次の備品は計算に含めていません（数量は保持しています）："
+                + "、".join(excluded_items)
+            )
 
         if rooms_by_day:
             sel_map = {s["item_id"]: int(s.get("qty", 0) or 0) for s in base_selections}
