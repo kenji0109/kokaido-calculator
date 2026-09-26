@@ -1357,6 +1357,144 @@ def make_calc_fingerprint(
     )
     return h.hexdigest()
 
+def build_all_details_df(
+    room_df: pd.DataFrame,
+    equipment_df: pd.DataFrame,
+    tech_df: pd.DataFrame,
+    internet_df: pd.DataFrame,
+) -> pd.DataFrame:
+    frames = []
+    if room_df is not None and not room_df.empty:
+        r = room_df.copy()
+        r = r.rename(columns={"品目": "名称"})
+        r["カテゴリ"] = "部屋"
+        frames.append(r[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
+
+    if equipment_df is not None and not equipment_df.empty:
+        e = equipment_df.copy()
+        e["カテゴリ"] = "設備"
+        e = e.rename(columns={"品目": "名称"})
+        frames.append(e[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
+
+    if tech_df is not None and not tech_df.empty:
+        t = tech_df.copy()
+        t["カテゴリ"] = "技術者"
+        t["名称"] = "舞台設備技術者"
+        frames.append(t[["日付", "カテゴリ", "名称", "区分", "小計"]])
+
+    if internet_df is not None and not internet_df.empty:
+        n = internet_df.copy()
+        n["カテゴリ"] = "インターネット"
+        n = n.rename(columns={"品目": "名称"})
+        frames.append(n[["日付", "カテゴリ", "名称", "対象", "小計", "備考"]])
+
+    if not frames:
+        return pd.DataFrame(columns=["日付", "カテゴリ", "名称", "区分", "小計", "備考"])
+    out = pd.concat(frames, ignore_index=True)
+    out["小計"] = pd.to_numeric(out["小計"], errors="coerce").round().astype("Int64")
+    return out
+
+def build_details_csv(all_df: pd.DataFrame) -> bytes:
+    # Excel で文字化けしないよう BOM 付き UTF-8
+    return all_df.to_csv(index=False).encode("utf-8-sig")
+
+def _pdf_cell(v: object) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+def build_estimate_pdf(
+    title: str,
+    period: str,
+    rooms: List[str],
+    totals: Dict[str, int],
+    all_df: pd.DataFrame,
+) -> bytes:
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    font = "HeiseiKakuGo-W5"
+    if font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont(font))
+
+    h1 = ParagraphStyle("h1", fontName=font, fontSize=16, leading=22)
+    body = ParagraphStyle("body", fontName=font, fontSize=9.5, leading=14)
+    cell = ParagraphStyle("cell", fontName=font, fontSize=8, leading=10.5)
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm
+    )
+    story = [
+        Paragraph(f"{title}　概算見積", h1),
+        Spacer(1, 4 * mm),
+        Paragraph(f"作成日：{pd.Timestamp.today().strftime(DATE_FMT)}", body),
+        Paragraph(f"期間：{period}", body),
+        Paragraph(f"部屋：{'、'.join(rooms)}", body),
+        Spacer(1, 4 * mm),
+    ]
+
+    grand = sum(int(v) for v in totals.values())
+    total_rows = [["項目", "金額"]] + [[k, yen(int(v))] for k, v in totals.items()] + [["総額", yen(grand)]]
+    tt = Table(total_rows, colWidths=[50 * mm, 40 * mm])
+    tt.hAlign = "LEFT"
+    tt.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+                ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#999999")),
+            ]
+        )
+    )
+    story += [tt, Spacer(1, 6 * mm), Paragraph("明細", body), Spacer(1, 2 * mm)]
+
+    detail_cols = ["日付", "カテゴリ", "名称", "区分", "対象", "小計", "備考"]
+    cols = [c for c in detail_cols if c in all_df.columns]
+    widths = {"日付": 20, "カテゴリ": 20, "名称": 44, "区分": 20, "対象": 20, "小計": 20, "備考": 42}
+    rows = [cols]
+    for _, r in all_df.iterrows():
+        row = []
+        for c in cols:
+            v = r.get(c)
+            if c == "小計":
+                txt = "" if _pdf_cell(v) == "" else yen(int(v))
+            else:
+                txt = _pdf_cell(v)
+            row.append(Paragraph(txt, cell))
+        rows.append(row)
+    scale = (A4[0] - 28 * mm) / (sum(widths[c] for c in cols) * mm)
+    dt_ = Table(rows, colWidths=[widths[c] * mm * scale for c in cols], repeatRows=1)
+    dt_.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font),
+                ("FONTSIZE", (0, 0), (-1, 0), 8),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#999999")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    story.append(dt_)
+    doc.build(story)
+    return buf.getvalue()
+
 def yen(x: int) -> str:
     try:
         return f"¥{int(x):,}"
@@ -1672,7 +1810,7 @@ def main():
         try:
             edited_days = st.data_editor(
                 st.session_state[days_key],
-                use_container_width=True,
+                width="stretch",
                 num_rows="fixed",
                 column_config={
                     "日付": st.column_config.TextColumn(disabled=True),
@@ -1691,7 +1829,7 @@ def main():
         except Exception:
             st.warning("この環境では日別編集UIが利用できないため、日別設定は表示のみになります。")
             edited_days = st.session_state[days_key]
-            st.dataframe(edited_days, use_container_width=True)
+            st.dataframe(edited_days, width="stretch")
 
         if not edited_days.empty and bool(edited_days["休館日"].any()):
             closed_list = edited_days.loc[edited_days["休館日"] == True, "日付"].astype(str).tolist()
@@ -1762,7 +1900,7 @@ def main():
                 view_df,
                 key=editor_key,
                 on_change=on_room_day_edit,
-                use_container_width=True,
+                width="stretch",
                 num_rows="fixed",
                 column_config={
                     "日付": st.column_config.TextColumn(disabled=True),
@@ -1780,7 +1918,7 @@ def main():
             )
         except Exception:
             st.warning("この環境では部屋×日編集UIが利用できないため、表示のみになります。")
-            st.dataframe(view_df, use_container_width=True)
+            st.dataframe(view_df, width="stretch")
 
     with right:
         st.subheader("2) 設備・技術者・インターネット（入力）")
@@ -2110,62 +2248,80 @@ def main():
                 render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
             render_kpis_cards(room_total, equipment_total, tech_total, internet_total)
 
+            invalid_ext_df = invalid_after_extension_rows(room_day_df)
+            if not invalid_ext_df.empty:
+                lines = [
+                    f"- {r['日付']} / {r['部屋']} / {r['区分']} / {r['延長']}"
+                    for _, r in invalid_ext_df.iterrows()
+                ]
+                st.error(
+                    "21:30終了の区分（夜間・午後-夜間・全日）は後延長できません。"
+                    "次の行の延長分は計算から除外しています（日付 / 部屋 / 区分 / 延長）：\n"
+                    + "\n".join(lines)
+                )
+
+            all_df = build_all_details_df(room_df, equipment_df, tech_df, internet_df)
+
+            period_label = (
+                start_ts.strftime(DATE_FMT)
+                if start_ts == end_ts
+                else f"{start_ts.strftime(DATE_FMT)} 〜 {end_ts.strftime(DATE_FMT)}"
+            )
+            file_stem = f"見積_{start_ts.strftime('%Y%m%d')}" + (
+                "" if start_ts == end_ts else f"-{end_ts.strftime('%Y%m%d')}"
+            )
+            dl1, dl2 = st.columns(2)
+            dl1.download_button(
+                "明細をCSVでダウンロード",
+                data=build_details_csv(all_df),
+                file_name=f"{file_stem}.csv",
+                mime="text/csv",
+                on_click="ignore",
+                width="stretch",
+            )
+            try:
+                pdf_bytes = build_estimate_pdf(
+                    title="料金電卓",
+                    period=period_label,
+                    rooms=list(selected_rooms),
+                    totals={
+                        "部屋": room_total,
+                        "設備": equipment_total,
+                        "技術者": tech_total,
+                        "インターネット": internet_total,
+                    },
+                    all_df=all_df,
+                )
+                dl2.download_button(
+                    "見積をPDFでダウンロード",
+                    data=pdf_bytes,
+                    file_name=f"{file_stem}.pdf",
+                    mime="application/pdf",
+                    on_click="ignore",
+                    width="stretch",
+                )
+            except Exception as e:
+                dl2.warning(f"PDFを作成できませんでした: {e}")
+
             tab_all, tab_rooms, tab_eq, tab_tech, tab_net = st.tabs(
                 ["明細（全部）", "部屋", "設備", "技術者", "インターネット"]
             )
 
             with tab_rooms:
-                invalid_ext_df = invalid_after_extension_rows(room_day_df)
-                if not invalid_ext_df.empty:
-                    lines = [
-                        f"- {r['日付']} / {r['部屋']} / {r['区分']} / {r['延長']}"
-                        for _, r in invalid_ext_df.iterrows()
-                    ]
-                    st.error(
-                        "21:30終了の区分（夜間・午後-夜間・全日）は後延長できません。"
-                        "次の行の延長分は計算から除外しています（日付 / 部屋 / 区分 / 延長）：\n"
-                        + "\n".join(lines)
-                    )
-                st.dataframe(room_df, use_container_width=True)
+                st.dataframe(room_df, width="stretch")
 
             with tab_eq:
-                st.dataframe(equipment_df, use_container_width=True)
+                st.dataframe(equipment_df, width="stretch")
 
             with tab_tech:
-                st.dataframe(tech_df, use_container_width=True)
+                st.dataframe(tech_df, width="stretch")
 
             with tab_net:
-                st.dataframe(internet_df, use_container_width=True)
+                st.dataframe(internet_df, width="stretch")
 
             with tab_all:
-                frames = []
-                if not room_df.empty:
-                    r = room_df.copy()
-                    r = r.rename(columns={"品目": "名称"})
-                    r["カテゴリ"] = "部屋"
-                    frames.append(r[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
-
-                if not equipment_df.empty:
-                    e = equipment_df.copy()
-                    e["カテゴリ"] = "設備"
-                    e = e.rename(columns={"品目": "名称"})
-                    frames.append(e[["日付", "カテゴリ", "名称", "区分", "小計", "備考"]])
-
-                if not tech_df.empty:
-                    t = tech_df.copy()
-                    t["カテゴリ"] = "技術者"
-                    t["名称"] = "舞台設備技術者"
-                    frames.append(t[["日付", "カテゴリ", "名称", "区分", "小計"]])
-
-                if not internet_df.empty:
-                    n = internet_df.copy()
-                    n["カテゴリ"] = "インターネット"
-                    n = n.rename(columns={"品目": "名称"})
-                    frames.append(n[["日付", "カテゴリ", "名称", "対象", "小計", "備考"]])
-
-                if frames:
-                    all_df = pd.concat(frames, ignore_index=True)
-                    st.dataframe(all_df, use_container_width=True)
+                if not all_df.empty:
+                    st.dataframe(all_df, width="stretch")
                 else:
                     st.info("明細がありません（部屋×日が全て「利用なし」など）。")
 
