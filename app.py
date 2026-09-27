@@ -1044,6 +1044,52 @@ def calc_rooms_from_room_day(prices_df: pd.DataFrame, room_day_df: pd.DataFrame)
     df = pd.DataFrame(rows)
     return total, df
 
+# =========================
+# 有料差額（通常料金 → 割増料金）
+# =========================
+PREMIUM_DIFF_COLUMNS = ["対象", "日付", "部屋", "区分", "延長", "通常料金", "割増料金", "差額", "備考"]
+
+def calc_premium_difference_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFrame) -> pd.DataFrame:
+    """利用する部屋×日ごとに、通常料金と割増料金（延長を含む）とその差額を求める。
+
+    部屋×日テーブルの「割増利用」の値にかかわらず、同じ区分・延長で両方の料金を計算する。
+    """
+    if room_day_df is None or room_day_df.empty:
+        return pd.DataFrame(columns=PREMIUM_DIFF_COLUMNS)
+
+    rows = []
+    for _, r in room_day_df.iterrows():
+        if bool(r.get("休館日", False)) or normalize_str(r.get("区分", "")) == "利用なし":
+            continue
+
+        one = pd.DataFrame([r.to_dict()])
+        amounts = {}
+        notes: List[str] = []
+        for label, is_business in (("通常料金", False), ("割増料金", True)):
+            one["割増利用"] = is_business
+            total, detail = calc_rooms_from_room_day(prices_df, one)
+            amounts[label] = total
+            # 料金が見つからない等で計算できなかった行は備考に残す
+            for _, d in detail.iterrows():
+                note = normalize_str(d.get("備考", ""))
+                if pd.isna(d.get("小計")) and note and note not in notes:
+                    notes.append(note)
+
+        rows.append(
+            {
+                "対象": True,
+                "日付": normalize_str(r.get("日付", "")),
+                "部屋": normalize_str(r.get("部屋", "")),
+                "区分": normalize_str(r.get("区分", "")),
+                "延長": _fix_room_extension(r.get("延長", "なし")),
+                "通常料金": amounts["通常料金"],
+                "割増料金": amounts["割増料金"],
+                "差額": amounts["割増料金"] - amounts["通常料金"],
+                "備考": " / ".join(notes),
+            }
+        )
+    return pd.DataFrame(rows, columns=PREMIUM_DIFF_COLUMNS)
+
 def invalid_after_extension_rows(room_day_df: pd.DataFrame) -> pd.DataFrame:
     cols = ["日付", "部屋", "区分", "延長"]
     if room_day_df is None or room_day_df.empty:
@@ -1661,6 +1707,103 @@ def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, in
         )
     html.append("</div>")
     st.markdown("\n".join(html), unsafe_allow_html=True)
+
+def render_premium_difference(prices_df: pd.DataFrame, room_day_df: pd.DataFrame, room_day_key: str) -> None:
+    """【有料差額計算】ボタンで開く、通常料金→割増料金の差額計算パネル。"""
+    open_key = "premium_diff_open"
+    if st.button(
+        "【有料差額計算】を閉じる" if st.session_state.get(open_key, False) else "【有料差額計算】",
+        key="premium_diff_toggle",
+        help="通常料金で申し込んだ利用が割増料金になった場合の、部屋料金の差額を計算します。",
+    ):
+        st.session_state[open_key] = not st.session_state.get(open_key, False)
+        st.rerun()
+
+    if not st.session_state.get(open_key, False):
+        return
+
+    with st.container(border=True):
+        st.markdown("#### 有料差額計算（通常料金 → 割増料金）")
+        st.caption(
+            "部屋×日テーブルの区分・延長で、通常料金と割増料金の両方を計算し差額を出します。"
+            "割増に変わる行だけ「対象」にチェックしてください（設備・技術者・インターネットは割増で変わらないため対象外）。"
+        )
+
+        diff_df = calc_premium_difference_rows(prices_df, room_day_df)
+        if diff_df.empty:
+            st.info("差額を計算できる部屋の利用がありません（休館日・「利用なし」は対象外です）。")
+            return
+
+        # 行の構成が変わったら（部屋・日付・区分・延長の変更）チェック状態をリセットする
+        signature = "|".join(
+            diff_df[["日付", "部屋", "区分", "延長"]].astype(str).agg(",".join, axis=1).tolist()
+        )
+        editor_key = f"premium_diff_editor_{room_day_key}_{abs(hash(signature))}"
+
+        b1, b2, _ = st.columns([1, 1, 2])
+        if b1.button("すべて対象", key="premium_diff_all", width="stretch"):
+            st.session_state[f"{editor_key}_default"] = True
+            st.session_state[f"{editor_key}_ver"] = st.session_state.get(f"{editor_key}_ver", 0) + 1
+        if b2.button("すべて解除", key="premium_diff_none", width="stretch"):
+            st.session_state[f"{editor_key}_default"] = False
+            st.session_state[f"{editor_key}_ver"] = st.session_state.get(f"{editor_key}_ver", 0) + 1
+
+        diff_df["対象"] = bool(st.session_state.get(f"{editor_key}_default", True))
+        view = diff_df.copy()
+        view["日付"] = view["日付"].map(format_date_label)
+
+        money = st.column_config.NumberColumn(format="yen", disabled=True)
+        edited = st.data_editor(
+            view,
+            key=f"{editor_key}_{st.session_state.get(f'{editor_key}_ver', 0)}",
+            width="stretch",
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "対象": st.column_config.CheckboxColumn(),
+                "日付": st.column_config.TextColumn(disabled=True),
+                "部屋": st.column_config.TextColumn(disabled=True),
+                "区分": st.column_config.TextColumn(disabled=True),
+                "延長": st.column_config.TextColumn(disabled=True),
+                "通常料金": money,
+                "割増料金": money,
+                "差額": money,
+                "備考": st.column_config.TextColumn(disabled=True),
+            },
+        )
+
+        target = edited[edited["対象"] == True]
+        normal_total = int(target["通常料金"].sum())
+        premium_total = int(target["割増料金"].sum())
+        diff_total = int(target["差額"].sum())
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("通常料金（対象分）", yen(normal_total))
+        c2.metric("割増料金（対象分）", yen(premium_total))
+        c3.metric("差額（追加でいただく金額）", yen(diff_total))
+        st.caption(f"対象：{len(target)}件 / 全{len(edited)}件")
+
+        if (target["備考"].astype(str) != "").any():
+            st.warning("計算できない料金を含む行があります。備考を確認してください（その分は0円として計算しています）。")
+
+        csv_df = target.drop(columns=["対象"])
+        csv_df = pd.concat(
+            [
+                csv_df,
+                pd.DataFrame(
+                    [{"日付": "合計", "通常料金": normal_total, "割増料金": premium_total, "差額": diff_total}]
+                ),
+            ],
+            ignore_index=True,
+        )
+        st.download_button(
+            "差額明細をCSVでダウンロード",
+            data=csv_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="有料差額.csv",
+            mime="text/csv",
+            on_click="ignore",
+            key="premium_diff_csv",
+        )
 
 # =========================
 # Main App
@@ -2280,6 +2423,8 @@ def main():
                     "次の行の延長分は計算から除外しています（日付 / 部屋 / 区分 / 延長）：\n"
                     + "\n".join(lines)
                 )
+
+            render_premium_difference(prices_df, room_day_df, room_day_key)
 
             all_df = build_all_details_df(room_df, equipment_df, tech_df, internet_df)
 
