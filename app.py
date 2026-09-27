@@ -1642,6 +1642,113 @@ def build_estimate_pdf(
     doc.build(story)
     return buf.getvalue()
 
+def build_difference_pdf(
+    heading: str,
+    period: str,
+    rooms: List[str],
+    summary: List[Tuple[str, int]],
+    detail_df: pd.DataFrame,
+    widths: Dict[str, float],
+    money_cols: Tuple[str, ...],
+    notes: Optional[List[str]] = None,
+) -> bytes:
+    """有料差額・全日差額の明細PDF（見積PDFと同じ体裁）。summary の最後の行を強調する。"""
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    font = "HeiseiKakuGo-W5"
+    if font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont(font))
+
+    h1 = ParagraphStyle("h1", fontName=font, fontSize=16, leading=22)
+    body = ParagraphStyle("body", fontName=font, fontSize=9.5, leading=14)
+    small = ParagraphStyle("small", fontName=font, fontSize=8, leading=11, textColor=colors.HexColor("#555555"))
+    cell = ParagraphStyle("cell", fontName=font, fontSize=8, leading=10.5)
+    cell_r = ParagraphStyle("cell_r", parent=cell, alignment=2)
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=14 * mm, bottomMargin=14 * mm
+    )
+    story = [
+        Paragraph(f"料金電卓　{heading}", h1),
+        Spacer(1, 4 * mm),
+        Paragraph(f"作成日：{pd.Timestamp.today().strftime(DATE_FMT)}", body),
+        Paragraph(f"期間：{period}", body),
+        Paragraph(f"部屋：{'、'.join(rooms)}", body),
+        Spacer(1, 4 * mm),
+    ]
+
+    total_rows = [["項目", "金額"]] + [[k, yen(int(v))] for k, v in summary]
+    tt = Table(total_rows, colWidths=[60 * mm, 40 * mm])
+    tt.hAlign = "LEFT"
+    tt.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+                ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
+                ("FONTSIZE", (0, -1), (-1, -1), 12),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#999999")),
+            ]
+        )
+    )
+    story += [tt, Spacer(1, 3 * mm)]
+    for n in notes or []:
+        story.append(Paragraph(n, small))
+    story += [Spacer(1, 5 * mm), Paragraph(f"明細（対象 {len(detail_df)}件）", body), Spacer(1, 2 * mm)]
+
+    cols = [c for c in widths if c in detail_df.columns]
+    head_r = ParagraphStyle("head_r", parent=cell, alignment=2)
+    rows = [[Paragraph(c, head_r if c in money_cols else cell) for c in cols]]
+    for _, r in detail_df.iterrows():
+        row = []
+        for c in cols:
+            v = r.get(c)
+            if c in money_cols:
+                row.append(Paragraph("" if _pdf_cell(v) == "" else yen(int(v)), cell_r))
+            elif pd.api.types.is_bool(v):
+                row.append(Paragraph("○" if bool(v) else "", cell))
+            else:
+                row.append(Paragraph(_pdf_cell(v), cell))
+        rows.append(row)
+    # 金額列の合計行
+    total_row = []
+    for i, c in enumerate(cols):
+        if c in money_cols:
+            s = int(pd.to_numeric(detail_df[c], errors="coerce").fillna(0).sum())
+            total_row.append(Paragraph(yen(s), cell_r))
+        else:
+            total_row.append(Paragraph("合計" if i == 0 else "", cell))
+    rows.append(total_row)
+
+    scale = (A4[0] - 28 * mm) / (sum(widths[c] for c in cols) * mm)
+    dt_ = Table(rows, colWidths=[widths[c] * mm * scale for c in cols], repeatRows=1)
+    dt_.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f6f6f6")),
+                ("LINEABOVE", (0, -1), (-1, -1), 1, colors.black),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#999999")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    story.append(dt_)
+    doc.build(story)
+    return buf.getvalue()
+
 def yen(x: int) -> str:
     try:
         return f"¥{int(x):,}"
@@ -1816,7 +1923,14 @@ def render_panel_toggle(container, label: str, open_key: str, help_text: str) ->
         st.session_state[open_key] = not is_open
         st.rerun()
 
-def render_premium_difference(prices_df: pd.DataFrame, room_day_df: pd.DataFrame, room_day_key: str) -> None:
+def render_premium_difference(
+    prices_df: pd.DataFrame,
+    room_day_df: pd.DataFrame,
+    room_day_key: str,
+    period_label: str,
+    rooms: List[str],
+    date_suffix: str,
+) -> None:
     """【有料差額計算】ボタンで開く、通常料金→割増料金の差額計算パネル。"""
     if not st.session_state.get(PREMIUM_DIFF_OPEN_KEY, False):
         return
@@ -1895,16 +2009,53 @@ def render_premium_difference(prices_df: pd.DataFrame, room_day_df: pd.DataFrame
             ],
             ignore_index=True,
         )
-        st.download_button(
+        d1, d2 = st.columns(2)
+        d1.download_button(
             "差額明細をCSVでダウンロード",
             data=csv_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="有料差額.csv",
+            file_name=f"有料差額_{date_suffix}.csv",
             mime="text/csv",
             on_click="ignore",
             key="premium_diff_csv",
+            width="stretch",
         )
+        try:
+            pdf_df = target.drop(columns=["対象"]).copy()
+            pdf_df["日付"] = pdf_df["日付"].map(format_date_label)
+            pdf_bytes = build_difference_pdf(
+                heading="有料差額（通常料金 → 割増料金）",
+                period=period_label,
+                rooms=rooms,
+                summary=[
+                    ("通常料金（対象分）", normal_total),
+                    ("割増料金（対象分）", premium_total),
+                    ("差額（追加でいただく金額）", diff_total),
+                ],
+                detail_df=pdf_df,
+                widths={"日付": 34, "部屋": 26, "区分": 18, "延長": 20, "通常料金": 20, "割増料金": 20, "差額": 20, "備考": 30},
+                money_cols=("通常料金", "割増料金", "差額"),
+                notes=["※部屋料金（延長を含む）のみ。設備・技術者・インターネットは割増で変わらないため含みません。"],
+            )
+            d2.download_button(
+                "差額明細をPDFでダウンロード",
+                data=pdf_bytes,
+                file_name=f"有料差額_{date_suffix}.pdf",
+                mime="application/pdf",
+                on_click="ignore",
+                key="premium_diff_pdf",
+                width="stretch",
+            )
+        except Exception as e:
+            d2.warning(f"PDFを作成できませんでした: {e}")
 
-def render_allday_difference(prices_df: pd.DataFrame, room_day_df: pd.DataFrame, room_day_key: str) -> None:
+def render_allday_difference(
+    prices_df: pd.DataFrame,
+    room_day_df: pd.DataFrame,
+    room_day_key: str,
+    period_label: str,
+    rooms: List[str],
+    date_suffix: str,
+) -> None:
     """【全日差額】ボタンで開く、一部の区分→全日に変更した場合の差額計算パネル。"""
     if not st.session_state.get(ALLDAY_DIFF_OPEN_KEY, False):
         return
@@ -2018,14 +2169,50 @@ def render_allday_difference(prices_df: pd.DataFrame, room_day_df: pd.DataFrame,
             ],
             ignore_index=True,
         )
-        st.download_button(
+        d1, d2 = st.columns(2)
+        d1.download_button(
             "全日差額の明細をCSVでダウンロード",
             data=csv_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="全日差額.csv",
+            file_name=f"全日差額_{date_suffix}.csv",
             mime="text/csv",
             on_click="ignore",
             key="allday_diff_csv",
+            width="stretch",
         )
+        try:
+            pdf_df = target.drop(columns=["対象"]).copy()
+            pdf_df["日付"] = pdf_df["日付"].map(format_date_label)
+            pdf_bytes = build_difference_pdf(
+                heading="全日差額（一部の区分 → 全日）",
+                period=period_label,
+                rooms=rooms,
+                summary=[
+                    ("変更前の料金（対象分）", before_total),
+                    ("全日料金（対象分）", allday_total),
+                    ("差額（追加でいただく金額）", diff_total),
+                ],
+                detail_df=pdf_df,
+                widths={
+                    "日付": 34, "部屋": 24, "割増": 12, "変更前区分": 22, "変更前料金": 20,
+                    "全日料金": 20, "差額": 20, "参考：個別追加": 22, "備考": 18,
+                },
+                money_cols=("変更前料金", "全日料金", "差額", "参考：個別追加"),
+                notes=[
+                    "※差額＝全日料金 − 変更前区分の料金（基本料金のみ。延長は含みません）。",
+                    f"※参考：全日にせず、足りない区分を個別に追加した場合 {yen(separate_total)}",
+                ],
+            )
+            d2.download_button(
+                "全日差額の明細をPDFでダウンロード",
+                data=pdf_bytes,
+                file_name=f"全日差額_{date_suffix}.pdf",
+                mime="application/pdf",
+                on_click="ignore",
+                key="allday_diff_pdf",
+                width="stretch",
+            )
+        except Exception as e:
+            d2.warning(f"PDFを作成できませんでした: {e}")
 
 # =========================
 # Main App
@@ -2659,19 +2846,21 @@ def main():
                 ALLDAY_DIFF_OPEN_KEY,
                 "午前・午後・夜間などで申し込んだ利用が、区分の追加で全日になった場合の差額を計算します。",
             )
-            render_premium_difference(prices_df, room_day_df, room_day_key)
-            render_allday_difference(prices_df, room_day_df, room_day_key)
-
-            all_df = build_all_details_df(room_df, equipment_df, tech_df, internet_df)
-
             period_label = (
                 start_ts.strftime(DATE_FMT)
                 if start_ts == end_ts
                 else f"{start_ts.strftime(DATE_FMT)} 〜 {end_ts.strftime(DATE_FMT)}"
             )
-            file_stem = f"見積_{start_ts.strftime('%Y%m%d')}" + (
+            date_suffix = start_ts.strftime("%Y%m%d") + (
                 "" if start_ts == end_ts else f"-{end_ts.strftime('%Y%m%d')}"
             )
+            file_stem = f"見積_{date_suffix}"
+
+            diff_args = (prices_df, room_day_df, room_day_key, period_label, list(selected_rooms), date_suffix)
+            render_premium_difference(*diff_args)
+            render_allday_difference(*diff_args)
+
+            all_df = build_all_details_df(room_df, equipment_df, tech_df, internet_df)
             dl1, dl2 = st.columns(2)
             dl1.download_button(
                 "明細をCSVでダウンロード",
