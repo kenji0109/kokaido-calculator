@@ -1854,6 +1854,8 @@ def inject_ui_css():
         unsafe_allow_html=True,
     )
 
+LAST_TOTALS_KEY = "last_totals"
+
 def render_totals_sticky(room_total: int, equipment_total: int, tech_total: int, internet_total: int):
     grand_total = room_total + equipment_total + tech_total + internet_total
 
@@ -2224,8 +2226,13 @@ def main():
 
     inject_ui_css()
 
-    # 上部の合計は、入力が確定した後（計算ボタンの直前）に描画する
+    # 上部の合計は、入力が確定した後（計算の後）に描画する。
+    # 再計算中に合計欄が消えて画面がずれないよう、まず前回の合計を表示しておき、計算後に置き換える。
     sticky_slot = st.empty()
+    last_totals = st.session_state.get(LAST_TOTALS_KEY)
+    if last_totals:
+        with sticky_slot.container():
+            render_totals_sticky(*last_totals)
 
     try:
         groups_df, items, group_meta = load_equipment_data()
@@ -2793,6 +2800,8 @@ def main():
 
         st.subheader("結果")
         if not selected_rooms:
+            sticky_slot.empty()
+            st.session_state.pop(LAST_TOTALS_KEY, None)
             st.info("部屋を選択すると、料金が自動で計算されます。")
         else:
             room_total, room_df = calc_rooms_from_room_day(prices_df, room_day_df)
@@ -2819,6 +2828,7 @@ def main():
 
             with sticky_slot.container():
                 render_totals_sticky(room_total, equipment_total, tech_total, internet_total)
+            st.session_state[LAST_TOTALS_KEY] = (room_total, equipment_total, tech_total, internet_total)
             render_kpis_cards(room_total, equipment_total, tech_total, internet_total)
 
             invalid_ext_df = invalid_after_extension_rows(room_day_df)
