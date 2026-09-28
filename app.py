@@ -1147,6 +1147,25 @@ def allday_difference_base_rows(room_day_df: pd.DataFrame) -> pd.DataFrame:
             )
     return pd.DataFrame(rows, columns=["対象", "日付", "部屋", "割増", "変更前区分"])
 
+def allday_separate_label(from_slot: str) -> str:
+    """参考列の見出し（例：変更前が午前-午後 → 「参考：夜間1区分」）。"""
+    missing = ALLDAY_MISSING_SLOTS.get(from_slot, [])
+    if not missing:
+        return "参考：個別追加"
+    return f"参考：{'・'.join(missing)}{len(missing)}区分"
+
+def split_separate_by_label(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """「参考：個別追加」列を、追加される区分ごとの列（例：「参考：夜間1区分」）に分ける（PDF用）。"""
+    out = df.copy()
+    labels = out["変更前区分"].map(allday_separate_label)
+    order = [allday_separate_label(s) for s in ALLDAY_FROM_SLOTS]
+    new_cols = [l for l in dict.fromkeys(order) if (labels == l).any()]
+    pos = out.columns.get_loc("参考：個別追加")
+    for i, l in enumerate(new_cols):
+        out.insert(pos + i, l, out["参考：個別追加"].where(labels == l))
+    out = out.drop(columns=["参考：個別追加"])
+    return out, new_cols
+
 def calc_allday_difference(prices_df: pd.DataFrame, base_rows: pd.DataFrame) -> pd.DataFrame:
     """変更前区分の料金と全日料金の差額（基本料金のみ。延長は含めない）を求める。"""
     rows = []
@@ -2024,6 +2043,12 @@ def render_premium_difference(
         try:
             pdf_df = target.drop(columns=["対象"]).copy()
             pdf_df["日付"] = pdf_df["日付"].map(format_date_label)
+            pdf_df, sep_cols = split_separate_by_label(pdf_df)
+            sep_notes = [
+                f"※{c.replace('参考：', '参考：全日にせず')}を個別に追加した場合 "
+                f"{yen(int(pd.to_numeric(pdf_df[c], errors='coerce').fillna(0).sum()))}"
+                for c in sep_cols
+            ]
             pdf_bytes = build_difference_pdf(
                 heading="有料差額（通常料金 → 割増料金）",
                 period=period_label,
@@ -2184,6 +2209,12 @@ def render_allday_difference(
         try:
             pdf_df = target.drop(columns=["対象"]).copy()
             pdf_df["日付"] = pdf_df["日付"].map(format_date_label)
+            pdf_df, sep_cols = split_separate_by_label(pdf_df)
+            sep_notes = [
+                f"※{c.replace('参考：', '参考：全日にせず')}を個別に追加した場合 "
+                f"{yen(int(pd.to_numeric(pdf_df[c], errors='coerce').fillna(0).sum()))}"
+                for c in sep_cols
+            ]
             pdf_bytes = build_difference_pdf(
                 heading="全日差額（一部の区分 → 全日）",
                 period=period_label,
@@ -2196,12 +2227,12 @@ def render_allday_difference(
                 detail_df=pdf_df,
                 widths={
                     "日付": 34, "部屋": 24, "割増": 12, "変更前区分": 22, "変更前料金": 20,
-                    "全日料金": 20, "差額": 20, "参考：個別追加": 22, "備考": 18,
+                    "全日料金": 20, "差額": 20, **{c: 22 for c in sep_cols}, "備考": 18,
                 },
-                money_cols=("変更前料金", "全日料金", "差額", "参考：個別追加"),
+                money_cols=("変更前料金", "全日料金", "差額", *sep_cols),
                 notes=[
                     "※差額＝全日料金 − 変更前区分の料金（基本料金のみ。延長は含みません）。",
-                    f"※参考：全日にせず、足りない区分を個別に追加した場合 {yen(separate_total)}",
+                    *sep_notes,
                 ],
             )
             d2.download_button(
