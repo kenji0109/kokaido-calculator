@@ -1778,6 +1778,28 @@ def inject_ui_css():
     st.markdown(
         """
 <style>
+/* 【有料差額計算】【全日差額】など、開いているパネルの「閉じる」ボタンを緑色にする */
+div[class*="st-key-panel_open_"] button {
+  background-color: #1e9e4a;
+  border-color: #1e9e4a;
+  color: #ffffff;
+  font-weight: 700;
+}
+div[class*="st-key-panel_open_"] button:hover,
+div[class*="st-key-panel_open_"] button:focus:not(:active) {
+  background-color: #16803b;
+  border-color: #16803b;
+  color: #ffffff;
+}
+div[class*="st-key-panel_open_"] button p {
+  color: #ffffff;
+  font-weight: 700;
+}
+/* 開いたパネル本体も緑の枠で囲む */
+div[class*="st-key-panel_body_"] {
+  border: 2px solid #1e9e4a !important;
+  border-left-width: 6px !important;
+}
 :root{
   --oai-bg: var(--background-color, #ffffff);
   --oai-card-bg: var(--secondary-background-color, rgba(255,255,255,0.98));
@@ -1936,8 +1958,9 @@ def render_panel_toggle(container, label: str, open_key: str, help_text: str) ->
     """押すたびにパネルの開閉を切り替えるボタン。"""
     is_open = bool(st.session_state.get(open_key, False))
     if container.button(
-        f"{label}を閉じる" if is_open else label,
-        key=f"{open_key}_toggle",
+        f"▼ {label}を閉じる" if is_open else label,
+        # 開いているときはキー名で緑色のスタイル（inject_ui_css の .st-key-panel_open_*）を当てる
+        key=f"panel_open_{open_key}" if is_open else f"{open_key}_toggle",
         help=help_text,
         width="stretch",
     ):
@@ -1956,7 +1979,7 @@ def render_premium_difference(
     if not st.session_state.get(PREMIUM_DIFF_OPEN_KEY, False):
         return
 
-    with st.container(border=True):
+    with st.container(border=True, key="panel_body_premium"):
         st.markdown("#### 有料差額計算（通常料金 → 割増料金）")
         st.caption(
             "部屋×日テーブルの区分・延長で、通常料金と割増料金の両方を計算し差額を出します。"
@@ -2081,7 +2104,7 @@ def render_allday_difference(
     if not st.session_state.get(ALLDAY_DIFF_OPEN_KEY, False):
         return
 
-    with st.container(border=True):
+    with st.container(border=True, key="panel_body_allday"):
         st.markdown("#### 全日差額（一部の区分 → 全日）")
         st.caption(
             "申し込み済みの区分（変更前区分）から全日に変更した場合に、追加でいただく金額を計算します。"
