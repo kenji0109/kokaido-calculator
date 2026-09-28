@@ -1778,27 +1778,32 @@ def inject_ui_css():
     st.markdown(
         """
 <style>
-/* 【有料差額計算】【全日差額】など、開いているパネルの「閉じる」ボタンを緑色にする */
-div[class*="st-key-panel_open_"] button {
-  background-color: #1e9e4a;
-  border-color: #1e9e4a;
+/* 開いているパネルの「閉じる」ボタンとパネル枠に色を付ける（全日差額＝緑、有料差額＝オレンジ） */
+div[class*="st-key-panel_open_"] button,
+div[class*="st-key-panel_open_"] button:hover,
+div[class*="st-key-panel_open_"] button:focus:not(:active) {
+  border-color: var(--panel-color);
+  background-color: var(--panel-color);
   color: #ffffff;
   font-weight: 700;
 }
 div[class*="st-key-panel_open_"] button:hover,
 div[class*="st-key-panel_open_"] button:focus:not(:active) {
-  background-color: #16803b;
-  border-color: #16803b;
-  color: #ffffff;
+  filter: brightness(0.88);
 }
 div[class*="st-key-panel_open_"] button p {
   color: #ffffff;
   font-weight: 700;
 }
-/* 開いたパネル本体も緑の枠で囲む */
 div[class*="st-key-panel_body_"] {
-  border: 2px solid #1e9e4a !important;
+  border: 2px solid var(--panel-color) !important;
   border-left-width: 6px !important;
+}
+div[class*="st-key-panel_open_allday"], div[class*="st-key-panel_body_allday"] {
+  --panel-color: #1e9e4a;
+}
+div[class*="st-key-panel_open_premium"], div[class*="st-key-panel_body_premium"] {
+  --panel-color: #e8750f;
 }
 :root{
   --oai-bg: var(--background-color, #ffffff);
