@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Callable, Dict, List, Tuple, Optional, Set
 
 import re
 import pandas as pd
@@ -1090,6 +1090,13 @@ def calc_premium_difference_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFr
         )
     return pd.DataFrame(rows, columns=PREMIUM_DIFF_COLUMNS)
 
+def premium_detail_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFrame) -> pd.DataFrame:
+    """有料差額のみ明細：部屋×日テーブルで「割増利用」にした行（通常→割増になる行）だけの差額。"""
+    if room_day_df is None or room_day_df.empty or "割増利用" not in room_day_df.columns:
+        return pd.DataFrame(columns=[c for c in PREMIUM_DIFF_COLUMNS if c != "対象"])
+    business = room_day_df[room_day_df["割増利用"] == True]
+    return calc_premium_difference_rows(prices_df, business).drop(columns=["対象"])
+
 # =========================
 # 全日差額（一部の区分 → 全日）
 # =========================
@@ -1520,6 +1527,19 @@ def build_all_details_df(
     out["小計"] = pd.to_numeric(out["小計"], errors="coerce").round().astype("Int64")
     return out
 
+# 延長料金のみ明細に出す行：部屋の前・後延長と、設備の区分「延長30分」（技術者の延長は含めない）
+EXTENSION_DETAIL_CATEGORIES = ("部屋", "設備")
+EXTENSION_DETAIL_SLOTS = {s for s in ROOM_EXTENSION_SLOTS if s != "なし"} | {"延長30分"}
+EXTENSION_DETAIL_COLUMNS = ["日付", "祝日", "カテゴリ", "名称", "区分", "小計", "備考"]
+
+def extension_detail_rows(all_df: pd.DataFrame) -> pd.DataFrame:
+    """明細（全部）から延長料金の行だけを取り出す。"""
+    if all_df is None or all_df.empty or "区分" not in all_df.columns:
+        return pd.DataFrame(columns=EXTENSION_DETAIL_COLUMNS)
+    m = all_df["カテゴリ"].isin(EXTENSION_DETAIL_CATEGORIES) & all_df["区分"].isin(EXTENSION_DETAIL_SLOTS)
+    cols = [c for c in EXTENSION_DETAIL_COLUMNS if c in all_df.columns]
+    return all_df.loc[m, cols].reset_index(drop=True)
+
 WEEKDAYS_JA = "月火水木金土日"
 
 def format_date_label(v: object) -> str:
@@ -1778,7 +1798,7 @@ def inject_ui_css():
     st.markdown(
         """
 <style>
-/* 開いているパネルの「閉じる」ボタンとパネル枠に色を付ける（全日差額＝緑、有料差額＝オレンジ） */
+/* 開いているパネルの「閉じる」ボタンとパネル枠に色を付ける（全日差額＝緑、有料差額＝オレンジ、延長・有料差額のみ明細＝青） */
 div[class*="st-key-panel_open_"] button,
 div[class*="st-key-panel_open_"] button:hover,
 div[class*="st-key-panel_open_"] button:focus:not(:active) {
@@ -1804,6 +1824,28 @@ div[class*="st-key-panel_open_allday"], div[class*="st-key-panel_body_allday"] {
 }
 div[class*="st-key-panel_open_premium"], div[class*="st-key-panel_body_premium"] {
   --panel-color: #e8750f;
+}
+div[class*="st-key-panel_open_detail_"], div[class*="st-key-panel_body_detail_"] {
+  --panel-color: #2f6fdb;
+}
+/* 差額・明細のボタン（2×2）はスマホでも縦1列にせず、横2列のままにする */
+.st-key-panel_toggles [data-testid="stColumn"] {
+  min-width: 0 !important;
+}
+@media (max-width: 640px) {
+  /* 「〜を閉じる」が「…」で切れないよう折り返し、2行になっても同じ段のボタンの高さをそろえる */
+  .st-key-panel_toggles button {
+    min-height: 3.6rem;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+  .st-key-panel_toggles button * {
+    white-space: normal !important;
+    text-overflow: clip !important;
+    overflow: visible !important;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
 }
 :root{
   --oai-bg: var(--background-color, #ffffff);
@@ -1958,13 +2000,17 @@ def render_kpis_cards(room_total: int, equipment_total: int, tech_total: int, in
 
 PREMIUM_DIFF_OPEN_KEY = "premium_diff_open"
 ALLDAY_DIFF_OPEN_KEY = "allday_diff_open"
+# 「detail_」で始めると inject_ui_css の .st-key-panel_*_detail_* で青色になる
+EXTENSION_DETAIL_OPEN_KEY = "detail_extension_open"
+PREMIUM_DETAIL_OPEN_KEY = "detail_premium_open"
 
 def render_panel_toggle(container, label: str, open_key: str, help_text: str) -> None:
     """押すたびにパネルの開閉を切り替えるボタン。"""
     is_open = bool(st.session_state.get(open_key, False))
     if container.button(
-        f"▼ {label}を閉じる" if is_open else label,
-        # 開いているときはキー名で緑色のスタイル（inject_ui_css の .st-key-panel_open_*）を当てる
+        # \u200b（幅ゼロの空白）は、スマホで2行になるとき「を閉じる」の前で改行させるため
+        f"▼ {label}\u200bを閉じる" if is_open else label,
+        # 開いているときはキー名で色付きのスタイル（inject_ui_css の .st-key-panel_open_*）を当てる
         key=f"panel_open_{open_key}" if is_open else f"{open_key}_toggle",
         help=help_text,
         width="stretch",
@@ -2278,6 +2324,173 @@ def render_allday_difference(
             )
         except Exception as e:
             d2.warning(f"PDFを作成できませんでした: {e}")
+
+def render_panel_downloads(
+    csv_df: pd.DataFrame,
+    file_stem: str,
+    key: str,
+    csv_label: str,
+    pdf_label: str,
+    build_pdf: Callable[[], bytes],
+) -> None:
+    """パネルの中身（表示している明細）をそのまま CSV・PDF で出力するボタン。"""
+    d1, d2 = st.columns(2)
+    d1.download_button(
+        csv_label,
+        data=csv_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"{file_stem}.csv",
+        mime="text/csv",
+        on_click="ignore",
+        key=f"{key}_csv",
+        width="stretch",
+    )
+    try:
+        d2.download_button(
+            pdf_label,
+            data=build_pdf(),
+            file_name=f"{file_stem}.pdf",
+            mime="application/pdf",
+            on_click="ignore",
+            key=f"{key}_pdf",
+            width="stretch",
+        )
+    except Exception as e:
+        d2.warning(f"PDFを作成できませんでした: {e}")
+
+def render_extension_detail(all_df: pd.DataFrame, period_label: str, rooms: List[str], date_suffix: str) -> None:
+    """【延長料金のみ明細】ボタンで開く、延長料金の行だけの明細パネル。"""
+    if not st.session_state.get(EXTENSION_DETAIL_OPEN_KEY, False):
+        return
+
+    with st.container(border=True, key="panel_body_detail_extension"):
+        st.markdown("#### 延長料金のみ明細")
+        st.caption("部屋の延長（前延長・後延長）と、設備の区分が「延長30分」の行だけを表示します（技術者は含みません）。")
+
+        ext_df = extension_detail_rows(all_df)
+        if ext_df.empty:
+            st.info(
+                "延長料金の明細はありません。部屋の延長は部屋×日テーブルの「延長」列、"
+                "設備の延長30分は日別設定の設備区分で設定できます。"
+            )
+            return
+
+        show_detail_df(ext_df)
+
+        amounts = pd.to_numeric(ext_df["小計"], errors="coerce").fillna(0)
+        room_total = int(amounts[ext_df["カテゴリ"] == "部屋"].sum())
+        equipment_total = int(amounts[ext_df["カテゴリ"] == "設備"].sum())
+        ext_total = room_total + equipment_total
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("部屋の延長", yen(room_total))
+        c2.metric("設備の延長", yen(equipment_total))
+        c3.metric("延長料金の合計", yen(ext_total))
+        st.caption(f"延長の明細：{len(ext_df)}件")
+
+        if ext_df["小計"].isna().any():
+            st.warning("計算できない延長を含む行があります。備考を確認してください（その分は0円として計算しています）。")
+
+        csv_df = pd.concat([ext_df, pd.DataFrame([{"日付": "合計", "小計": ext_total}])], ignore_index=True)
+        render_panel_downloads(
+            csv_df,
+            file_stem=f"延長料金_{date_suffix}",
+            key="extension_detail",
+            csv_label="延長料金の明細をCSVでダウンロード",
+            pdf_label="延長料金の明細をPDFでダウンロード",
+            build_pdf=lambda: build_difference_pdf(
+                heading="延長料金のみ明細",
+                period=period_label,
+                rooms=rooms,
+                summary=[
+                    ("部屋の延長", room_total),
+                    ("設備の延長", equipment_total),
+                    ("延長料金の合計", ext_total),
+                ],
+                detail_df=ext_df,
+                widths={"日付": 34, "祝日": 20, "カテゴリ": 16, "名称": 36, "区分": 24, "小計": 20, "備考": 40},
+                money_cols=("小計",),
+                notes=["※部屋の延長と、設備の区分が「延長30分」の行のみ。技術者の延長は含みません。"],
+            ),
+        )
+
+def render_premium_detail(
+    prices_df: pd.DataFrame,
+    room_day_df: pd.DataFrame,
+    period_label: str,
+    rooms: List[str],
+    date_suffix: str,
+) -> None:
+    """【有料差額のみ明細】ボタンで開く、割増利用にした行だけの差額明細パネル。"""
+    if not st.session_state.get(PREMIUM_DETAIL_OPEN_KEY, False):
+        return
+
+    with st.container(border=True, key="panel_body_detail_premium"):
+        st.markdown("#### 有料差額のみ明細（通常料金 → 割増料金）")
+        st.caption(
+            "部屋×日テーブルで「割増利用」にチェックした行だけを表示し、通常料金との差額を出します。"
+            "行を選んで試算するときは【有料差額計算】を使ってください。"
+        )
+
+        detail_df = premium_detail_rows(prices_df, room_day_df)
+        if detail_df.empty:
+            st.info("割増利用の行はありません。部屋×日テーブルの「割増利用」にチェックすると表示されます。")
+            return
+
+        detail_df["日付"] = detail_df["日付"].map(format_date_label)
+        money = st.column_config.NumberColumn(format="yen")
+        st.dataframe(
+            detail_df,
+            width="stretch",
+            hide_index=True,
+            column_config={"通常料金": money, "割増料金": money, "差額": money},
+        )
+
+        normal_total = int(detail_df["通常料金"].sum())
+        premium_total = int(detail_df["割増料金"].sum())
+        diff_total = int(detail_df["差額"].sum())
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("通常料金", yen(normal_total))
+        c2.metric("割増料金", yen(premium_total))
+        c3.metric("差額（追加でいただく金額）", yen(diff_total))
+        st.caption(f"割増利用の行：{len(detail_df)}件")
+
+        if (detail_df["備考"].astype(str) != "").any():
+            st.warning("計算できない料金を含む行があります。備考を確認してください（その分は0円として計算しています）。")
+
+        csv_df = pd.concat(
+            [
+                detail_df,
+                pd.DataFrame(
+                    [{"日付": "合計", "通常料金": normal_total, "割増料金": premium_total, "差額": diff_total}]
+                ),
+            ],
+            ignore_index=True,
+        )
+        render_panel_downloads(
+            csv_df,
+            file_stem=f"有料差額明細_{date_suffix}",
+            key="premium_detail",
+            csv_label="有料差額の明細をCSVでダウンロード",
+            pdf_label="有料差額の明細をPDFでダウンロード",
+            build_pdf=lambda: build_difference_pdf(
+                heading="有料差額のみ明細（通常料金 → 割増料金）",
+                period=period_label,
+                rooms=rooms,
+                summary=[
+                    ("通常料金", normal_total),
+                    ("割増料金", premium_total),
+                    ("差額（追加でいただく金額）", diff_total),
+                ],
+                detail_df=detail_df,
+                widths={"日付": 34, "部屋": 26, "区分": 18, "延長": 20, "通常料金": 20, "割増料金": 20, "差額": 20, "備考": 30},
+                money_cols=("通常料金", "割増料金", "差額"),
+                notes=[
+                    "※部屋×日テーブルで割増利用にした行のみ。部屋料金（延長を含む）だけで、"
+                    "設備・技術者・インターネットは割増で変わらないため含みません。"
+                ],
+            ),
+        )
 
 # =========================
 # Main App
@@ -2906,19 +3119,34 @@ def main():
                     + "\n".join(lines)
                 )
 
-            t1, t2 = st.columns(2)
-            render_panel_toggle(
-                t1,
-                "【有料差額計算】",
-                PREMIUM_DIFF_OPEN_KEY,
-                "通常料金で申し込んだ利用が割増料金になった場合の、部屋料金の差額を計算します。",
-            )
-            render_panel_toggle(
-                t2,
-                "【全日差額】",
-                ALLDAY_DIFF_OPEN_KEY,
-                "午前・午後・夜間などで申し込んだ利用が、区分の追加で全日になった場合の差額を計算します。",
-            )
+            # 上段＝差額の試算、下段＝明細の絞り込み表示。スマホでも 2×2 のまま（inject_ui_css の .st-key-panel_toggles）
+            with st.container(key="panel_toggles"):
+                t1, t2 = st.columns(2)
+                render_panel_toggle(
+                    t1,
+                    "【有料差額計算】",
+                    PREMIUM_DIFF_OPEN_KEY,
+                    "通常料金で申し込んだ利用が割増料金になった場合の、部屋料金の差額を計算します。",
+                )
+                render_panel_toggle(
+                    t2,
+                    "【全日差額】",
+                    ALLDAY_DIFF_OPEN_KEY,
+                    "午前・午後・夜間などで申し込んだ利用が、区分の追加で全日になった場合の差額を計算します。",
+                )
+                t3, t4 = st.columns(2)
+                render_panel_toggle(
+                    t3,
+                    "延長料金のみ明細",
+                    EXTENSION_DETAIL_OPEN_KEY,
+                    "部屋の延長（前延長・後延長）と、設備の「延長30分」の明細だけを表示します（技術者は含みません）。",
+                )
+                render_panel_toggle(
+                    t4,
+                    "有料差額のみ明細",
+                    PREMIUM_DETAIL_OPEN_KEY,
+                    "部屋×日テーブルで割増利用にした行だけを表示し、通常料金との差額を出します。",
+                )
             period_label = (
                 start_ts.strftime(DATE_FMT)
                 if start_ts == end_ts
@@ -2934,6 +3162,9 @@ def main():
             render_allday_difference(*diff_args)
 
             all_df = build_all_details_df(room_df, equipment_df, tech_df, internet_df)
+            render_extension_detail(all_df, period_label, list(selected_rooms), date_suffix)
+            render_premium_detail(prices_df, room_day_df, period_label, list(selected_rooms), date_suffix)
+
             dl1, dl2 = st.columns(2)
             dl1.download_button(
                 "明細をCSVでダウンロード",
