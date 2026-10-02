@@ -1091,11 +1091,11 @@ def calc_premium_difference_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFr
     return pd.DataFrame(rows, columns=PREMIUM_DIFF_COLUMNS)
 
 def premium_detail_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFrame) -> pd.DataFrame:
-    """有料差額のみ明細：部屋×日テーブルで「割増利用」にした行（通常→割増になる行）だけの差額。"""
-    if room_day_df is None or room_day_df.empty or "割増利用" not in room_day_df.columns:
-        return pd.DataFrame(columns=[c for c in PREMIUM_DIFF_COLUMNS if c != "対象"])
-    business = room_day_df[room_day_df["割増利用"] == True]
-    return calc_premium_difference_rows(prices_df, business).drop(columns=["対象"])
+    """有料差額のみ明細：利用する部屋×日すべてを割増料金にした場合の差額。
+
+    部屋×日テーブルの「割増利用」にチェックしていなくても（通常料金で選んだままでも）計算する。
+    """
+    return calc_premium_difference_rows(prices_df, room_day_df).drop(columns=["対象"])
 
 # =========================
 # 全日差額（一部の区分 → 全日）
@@ -2420,20 +2420,21 @@ def render_premium_detail(
     rooms: List[str],
     date_suffix: str,
 ) -> None:
-    """【有料差額のみ明細】ボタンで開く、割増利用にした行だけの差額明細パネル。"""
+    """【有料差額のみ明細】ボタンで開く、通常料金→割増料金の差額明細パネル（割増利用のチェック不要）。"""
     if not st.session_state.get(PREMIUM_DETAIL_OPEN_KEY, False):
         return
 
     with st.container(border=True, key="panel_body_detail_premium"):
         st.markdown("#### 有料差額のみ明細（通常料金 → 割増料金）")
         st.caption(
-            "部屋×日テーブルで「割増利用」にチェックした行だけを表示し、通常料金との差額を出します。"
-            "行を選んで試算するときは【有料差額計算】を使ってください。"
+            "利用する部屋の区分・延長のまま、通常料金と割増料金の両方を計算して差額を出します。"
+            "部屋×日テーブルの「割増利用」にチェックする必要はありません。"
+            "一部の行だけで計算するときは【有料差額計算】を使ってください。"
         )
 
         detail_df = premium_detail_rows(prices_df, room_day_df)
         if detail_df.empty:
-            st.info("割増利用の行はありません。部屋×日テーブルの「割増利用」にチェックすると表示されます。")
+            st.info("差額を計算できる部屋の利用がありません（休館日・「利用なし」は対象外です）。")
             return
 
         detail_df["日付"] = detail_df["日付"].map(format_date_label)
@@ -2453,7 +2454,7 @@ def render_premium_detail(
         c1.metric("通常料金", yen(normal_total))
         c2.metric("割増料金", yen(premium_total))
         c3.metric("差額（追加でいただく金額）", yen(diff_total))
-        st.caption(f"割増利用の行：{len(detail_df)}件")
+        st.caption(f"明細：{len(detail_df)}件")
 
         if (detail_df["備考"].astype(str) != "").any():
             st.warning("計算できない料金を含む行があります。備考を確認してください（その分は0円として計算しています）。")
@@ -2486,7 +2487,7 @@ def render_premium_detail(
                 widths={"日付": 34, "部屋": 26, "区分": 18, "延長": 20, "通常料金": 20, "割増料金": 20, "差額": 20, "備考": 30},
                 money_cols=("通常料金", "割増料金", "差額"),
                 notes=[
-                    "※部屋×日テーブルで割増利用にした行のみ。部屋料金（延長を含む）だけで、"
+                    "※利用する部屋すべてを割増料金にした場合の差額。部屋料金（延長を含む）だけで、"
                     "設備・技術者・インターネットは割増で変わらないため含みません。"
                 ],
             ),
@@ -3145,7 +3146,7 @@ def main():
                     t4,
                     "有料差額のみ明細",
                     PREMIUM_DETAIL_OPEN_KEY,
-                    "部屋×日テーブルで割増利用にした行だけを表示し、通常料金との差額を出します。",
+                    "通常料金で選んだ部屋の利用が割増料金になった場合の差額を表示します（割増利用のチェックは不要）。",
                 )
             period_label = (
                 start_ts.strftime(DATE_FMT)
