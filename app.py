@@ -2505,11 +2505,10 @@ def main():
 
     # 上部の合計は、入力が確定した後（計算の後）に描画する。
     # 再計算中に合計欄が消えて画面がずれないよう、まず前回の合計を表示しておき、計算後に置き換える。
+    # 部屋を選ぶ前も ¥0 で表示しておく（最初に部屋を選んだときに合計欄が現れて、部屋の選択欄が下にずれないように）
     sticky_slot = st.empty()
-    last_totals = st.session_state.get(LAST_TOTALS_KEY)
-    if last_totals:
-        with sticky_slot.container():
-            render_totals_sticky(*last_totals)
+    with sticky_slot.container():
+        render_totals_sticky(*st.session_state.get(LAST_TOTALS_KEY, (0, 0, 0, 0)))
 
     try:
         groups_df, items, group_meta = load_equipment_data()
@@ -3077,7 +3076,8 @@ def main():
 
         st.subheader("結果")
         if not selected_rooms:
-            sticky_slot.empty()
+            with sticky_slot.container():
+                render_totals_sticky(0, 0, 0, 0)
             st.session_state.pop(LAST_TOTALS_KEY, None)
             st.info("部屋を選択すると、料金が自動で計算されます。")
         else:
