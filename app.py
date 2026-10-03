@@ -44,6 +44,15 @@ ROOM_EXTENSION_SLOTS = ["なし", "前延長30分", "後延長30分", "前後延
 # 「全館」を選択したときは他の部屋の選択を外す
 ALL_BUILDING_ROOM = "全館"
 
+# 部屋の選択欄に出す順番（ここにない部屋は、この後ろに名前順で出す）
+ROOM_DISPLAY_ORDER = [
+    ALL_BUILDING_ROOM,
+    "中集会室", "特別室", "小集会室",
+    "第9会議室", "第6会議室", "第7会議室", "第8会議室",
+    "大集会室", "控室1", "控室2", "第5会議室",
+    "大会議室", "第1会議室", "第2会議室", "第3会議室", "第4会議室",
+]
+
 # 21:30終了の区分（後延長できない）
 ROOM_SLOTS_ENDING_2130 = {"夜間", "午後-夜間", "全日"}
 ROOM_EXTENSIONS_AFTER = {"後延長30分", "前後延長30分"}
@@ -2584,10 +2593,9 @@ def main():
                     "休館日の判定ができないため、ご注意ください。"
                 )
 
-        room_candidates = sorted(prices_df["room"].unique().tolist())
-        # 「全館」を先頭に置き、組み込みの「Select all」の代わりに使う
-        if ALL_BUILDING_ROOM in room_candidates:
-            room_candidates = [ALL_BUILDING_ROOM] + [r for r in room_candidates if r != ALL_BUILDING_ROOM]
+        # ROOM_DISPLAY_ORDER の順に並べる。「全館」は先頭に置き、組み込みの「Select all」の代わりに使う
+        all_rooms = set(prices_df["room"].unique().tolist())
+        room_candidates = [r for r in ROOM_DISPLAY_ORDER if r in all_rooms] + sorted(all_rooms - set(ROOM_DISPLAY_ORDER))
 
         def on_rooms_selected_change():
             # 「全館」を新たに選択したときは、他の部屋の選択を外す
