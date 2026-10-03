@@ -1099,13 +1099,6 @@ def calc_premium_difference_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFr
         )
     return pd.DataFrame(rows, columns=PREMIUM_DIFF_COLUMNS)
 
-def premium_detail_rows(prices_df: pd.DataFrame, room_day_df: pd.DataFrame) -> pd.DataFrame:
-    """有料差額のみ明細：利用する部屋×日すべてを割増料金にした場合の差額。
-
-    部屋×日テーブルの「割増利用」にチェックしていなくても（通常料金で選んだままでも）計算する。
-    """
-    return calc_premium_difference_rows(prices_df, room_day_df).drop(columns=["対象"])
-
 # =========================
 # 全日差額（一部の区分 → 全日）
 # =========================
@@ -1807,7 +1800,7 @@ def inject_ui_css():
     st.markdown(
         """
 <style>
-/* 開いているパネルの「閉じる」ボタンとパネル枠に色を付ける（全日差額＝緑、有料差額＝オレンジ、延長・有料差額のみ明細＝青） */
+/* 開いているパネルの「閉じる」ボタンとパネル枠に色を付ける（全日差額＝緑、有料差額＝オレンジ、延長料金のみ明細＝青） */
 div[class*="st-key-panel_open_"] button,
 div[class*="st-key-panel_open_"] button:hover,
 div[class*="st-key-panel_open_"] button:focus:not(:active) {
@@ -1837,7 +1830,7 @@ div[class*="st-key-panel_open_premium"], div[class*="st-key-panel_body_premium"]
 div[class*="st-key-panel_open_detail_"], div[class*="st-key-panel_body_detail_"] {
   --panel-color: #2f6fdb;
 }
-/* 差額・明細のボタン（2×2）はスマホでも縦1列にせず、横2列のままにする */
+/* 差額のボタン（【有料差額計算】【全日差額】）はスマホでも縦1列にせず、横2列のままにする */
 .st-key-panel_toggles [data-testid="stColumn"] {
   min-width: 0 !important;
 }
@@ -2011,7 +2004,6 @@ PREMIUM_DIFF_OPEN_KEY = "premium_diff_open"
 ALLDAY_DIFF_OPEN_KEY = "allday_diff_open"
 # 「detail_」で始めると inject_ui_css の .st-key-panel_*_detail_* で青色になる
 EXTENSION_DETAIL_OPEN_KEY = "detail_extension_open"
-PREMIUM_DETAIL_OPEN_KEY = "detail_premium_open"
 
 def render_panel_toggle(container, label: str, open_key: str, help_text: str) -> None:
     """押すたびにパネルの開閉を切り替えるボタン。"""
@@ -2419,86 +2411,6 @@ def render_extension_detail(all_df: pd.DataFrame, period_label: str, rooms: List
                 widths={"日付": 34, "祝日": 20, "カテゴリ": 16, "名称": 36, "区分": 24, "小計": 20, "備考": 40},
                 money_cols=("小計",),
                 notes=["※部屋の延長と、設備の区分が「延長30分」の行のみ。技術者の延長は含みません。"],
-            ),
-        )
-
-def render_premium_detail(
-    prices_df: pd.DataFrame,
-    room_day_df: pd.DataFrame,
-    period_label: str,
-    rooms: List[str],
-    date_suffix: str,
-) -> None:
-    """【有料差額のみ明細】ボタンで開く、通常料金→割増料金の差額明細パネル（割増利用のチェック不要）。"""
-    if not st.session_state.get(PREMIUM_DETAIL_OPEN_KEY, False):
-        return
-
-    with st.container(border=True, key="panel_body_detail_premium"):
-        st.markdown("#### 有料差額のみ明細（通常料金 → 割増料金）")
-        st.caption(
-            "利用する部屋の区分・延長のまま、通常料金と割増料金の両方を計算して差額を出します。"
-            "部屋×日テーブルの「割増利用」にチェックする必要はありません。"
-            "一部の行だけで計算するときは【有料差額計算】を使ってください。"
-        )
-
-        detail_df = premium_detail_rows(prices_df, room_day_df)
-        if detail_df.empty:
-            st.info("差額を計算できる部屋の利用がありません（休館日・「利用なし」は対象外です）。")
-            return
-
-        detail_df["日付"] = detail_df["日付"].map(format_date_label)
-        money = st.column_config.NumberColumn(format="yen")
-        st.dataframe(
-            detail_df,
-            width="stretch",
-            hide_index=True,
-            column_config={"通常料金": money, "割増料金": money, "差額": money},
-        )
-
-        normal_total = int(detail_df["通常料金"].sum())
-        premium_total = int(detail_df["割増料金"].sum())
-        diff_total = int(detail_df["差額"].sum())
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("通常料金", yen(normal_total))
-        c2.metric("割増料金", yen(premium_total))
-        c3.metric("差額（追加でいただく金額）", yen(diff_total))
-        st.caption(f"明細：{len(detail_df)}件")
-
-        if (detail_df["備考"].astype(str) != "").any():
-            st.warning("計算できない料金を含む行があります。備考を確認してください（その分は0円として計算しています）。")
-
-        csv_df = pd.concat(
-            [
-                detail_df,
-                pd.DataFrame(
-                    [{"日付": "合計", "通常料金": normal_total, "割増料金": premium_total, "差額": diff_total}]
-                ),
-            ],
-            ignore_index=True,
-        )
-        render_panel_downloads(
-            csv_df,
-            file_stem=f"有料差額明細_{date_suffix}",
-            key="premium_detail",
-            csv_label="有料差額の明細をCSVでダウンロード",
-            pdf_label="有料差額の明細をPDFでダウンロード",
-            build_pdf=lambda: build_difference_pdf(
-                heading="有料差額のみ明細（通常料金 → 割増料金）",
-                period=period_label,
-                rooms=rooms,
-                summary=[
-                    ("通常料金", normal_total),
-                    ("割増料金", premium_total),
-                    ("差額（追加でいただく金額）", diff_total),
-                ],
-                detail_df=detail_df,
-                widths={"日付": 34, "部屋": 26, "区分": 18, "延長": 20, "通常料金": 20, "割増料金": 20, "差額": 20, "備考": 30},
-                money_cols=("通常料金", "割増料金", "差額"),
-                notes=[
-                    "※利用する部屋すべてを割増料金にした場合の差額。部屋料金（延長を含む）だけで、"
-                    "設備・技術者・インターネットは割増で変わらないため含みません。"
-                ],
             ),
         )
 
@@ -3128,7 +3040,7 @@ def main():
                     + "\n".join(lines)
                 )
 
-            # 上段＝差額の試算、下段＝明細の絞り込み表示。スマホでも 2×2 のまま（inject_ui_css の .st-key-panel_toggles）
+            # 上段＝差額の試算（スマホでも横2列のまま：inject_ui_css の .st-key-panel_toggles）、下段＝延長料金のみ明細
             with st.container(key="panel_toggles"):
                 t1, t2 = st.columns(2)
                 render_panel_toggle(
@@ -3143,18 +3055,11 @@ def main():
                     ALLDAY_DIFF_OPEN_KEY,
                     "午前・午後・夜間などで申し込んだ利用が、区分の追加で全日になった場合の差額を計算します。",
                 )
-                t3, t4 = st.columns(2)
                 render_panel_toggle(
-                    t3,
+                    st,
                     "延長料金のみ明細",
                     EXTENSION_DETAIL_OPEN_KEY,
                     "部屋の延長（前延長・後延長）と、設備の「延長30分」の明細だけを表示します（技術者は含みません）。",
-                )
-                render_panel_toggle(
-                    t4,
-                    "有料差額のみ明細",
-                    PREMIUM_DETAIL_OPEN_KEY,
-                    "通常料金で選んだ部屋の利用が割増料金になった場合の差額を表示します（割増利用のチェックは不要）。",
                 )
             period_label = (
                 start_ts.strftime(DATE_FMT)
@@ -3172,7 +3077,6 @@ def main():
 
             all_df = build_all_details_df(room_df, equipment_df, tech_df, internet_df)
             render_extension_detail(all_df, period_label, list(selected_rooms), date_suffix)
-            render_premium_detail(prices_df, room_day_df, period_label, list(selected_rooms), date_suffix)
 
             dl1, dl2 = st.columns(2)
             dl1.download_button(
