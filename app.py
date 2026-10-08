@@ -558,8 +558,16 @@ def calc_equipment_total_for_day(
 
         is_slot_item = it.price_per_slot > 0
         is_once_item = (it.price_per_slot == 0) and (it.price_once_yen > 0)
+        # 電源使用料は区分数にかかわらず1日単位（price_per_slot を1日あたりの単価として使う）
+        is_daily_item = is_slot_item and bool(it.is_power_item)
 
-        if is_slot_item:
+        if is_daily_item:
+            mult = 1 if mult > 0 else 0
+            per_slot_sub = it.price_per_slot * billed_qty * mult
+            once_sub = it.price_once_yen * billed_qty
+            subtotal = per_slot_sub + once_sub
+            charge_type = "日額課金"
+        elif is_slot_item:
             per_slot_sub = it.price_per_slot * billed_qty * mult
             once_sub = it.price_once_yen * billed_qty
             subtotal = per_slot_sub + once_sub
@@ -584,6 +592,8 @@ def calc_equipment_total_for_day(
         note = it.notes or ""
         if iid in PA_ITEMS_WITH_INCLUDED_MIC:
             note = (note + " / " if note else "") + "マイク1本・スタンド1本付属"
+        if is_daily_item:
+            note = (note + " / " if note else "") + "1日単位"
 
         if iid in MIC_ITEMS:
             ded = int(deducted_note.get(iid, 0))
@@ -2836,7 +2846,8 @@ def main():
 
                     price_txt = []
                     if it.price_per_slot > 0:
-                        price_txt.append(f"1区分:{it.price_per_slot:,}円")
+                        per = "1日" if it.is_power_item else "1区分"
+                        price_txt.append(f"{per}:{it.price_per_slot:,}円")
                     if it.price_once_yen > 0:
                         price_txt.append(f"単価:{it.price_once_yen:,}円")
                     price_str = " / ".join(price_txt) if price_txt else "料金未設定"
